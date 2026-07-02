@@ -1304,23 +1304,38 @@ describe("GitHub backfill", () => {
     );
   });
 
-  it("resumes from the same page when a cap truncates it mid-page", async () => {
+  it("consumes a whole final page instead of saving a same-page resume cursor", async () => {
     const env = createTestEnv({ GITHUB_PUBLIC_TOKEN: "public-token" });
     await seedRegisteredRepo(env);
     vi.stubGlobal("fetch", issuesOffsetFetch(200));
 
-    // Cap at 150 against a repo with 200 issues: page 1 (per_page=100) yields 1-100, page 2 yields 101-200
-    // but the cap leaves room for only 50, so page 2 is consumed partway. The resume cursor must point at
-    // page 2 (the partially consumed page), not page 3, so a later run picks up 151-200 rather than skipping
-    // them. All 150 within the cap are stored (a shrinking-per_page crawl would store only 100).
+    // Cap at 150 against a repo with 200 issues: page 1 (per_page=100) yields 1-100, page 2 yields 101-200.
+    // Because the cursor has only page precision, page 2 must be consumed atomically; saving cursor "2" after
+    // only 50 entries would replay issues 101-150 on resume and inflate the persisted fetched count.
     const result = await backfillRegisteredRepositories(env, {
       mode: "full",
       limits: { issues: 150, pullRequests: 0, recentMergedPullRequests: 0, pullRequestDetails: 0 },
     });
 
-    expect(result.repos[0]).toMatchObject({ openIssues: 150 });
+    expect(result.repos[0]).toMatchObject({ openIssues: 200 });
     expect(await listRepoSyncSegments(env, "JSONbored/gittensory")).toEqual(
-      expect.arrayContaining([expect.objectContaining({ segment: "open_issues", status: "capped", nextCursor: "2" })]),
+      expect.arrayContaining([expect.objectContaining({ segment: "open_issues", status: "complete", fetchedCount: 200, nextCursor: null })]),
+    );
+  });
+
+  it("advances to the next page when a whole-page cap still has more results", async () => {
+    const env = createTestEnv({ GITHUB_PUBLIC_TOKEN: "public-token" });
+    await seedRegisteredRepo(env);
+    vi.stubGlobal("fetch", issuesOffsetFetch(250));
+
+    const result = await backfillRegisteredRepositories(env, {
+      mode: "full",
+      limits: { issues: 150, pullRequests: 0, recentMergedPullRequests: 0, pullRequestDetails: 0 },
+    });
+
+    expect(result.repos[0]).toMatchObject({ openIssues: 200 });
+    expect(await listRepoSyncSegments(env, "JSONbored/gittensory")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ segment: "open_issues", status: "capped", fetchedCount: 200, nextCursor: "3" })]),
     );
   });
 
