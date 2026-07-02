@@ -23,7 +23,7 @@ describe("globToRegExp (the exported compiler itself — must be safe for ANY di
     expect(Date.now() - start).toBeLessThan(1000);
   });
 
-  it("a glob AT the safe cap (2 wildcards), called directly, still compiles and matches normally — proves the cap is inclusive, not exclusive", () => {
+  it("a glob AT the safe cap (2 wildcard groups), called directly, still compiles and matches normally — proves the cap is inclusive, not exclusive", () => {
     const atCap = "src/*/*.ts";
     expect(globToRegExp(atCap).test("src/a/f.ts")).toBe(true);
     expect(globToRegExp(atCap).test("src/a/f.js")).toBe(false);
@@ -111,10 +111,9 @@ describe("change-guardrail glob matching", () => {
     expect(isGuardrailHit(["unrelated/file.ts"], [pathological])).toBe(true);
   });
 
-  it("SECURITY (ReDoS): a glob AT the safe cap (2 wildcards) still compiles and matches NORMALLY (not the fail-safe path)", () => {
-    // Exactly 2 stars: at the cap, still safely compiled/evaluated — proves the cap is inclusive, not exclusive,
-    // and that ordinary (non-pathological) multi-wildcard globs keep their real matching semantics. This is also
-    // the shape of nearly every real guardrail glob in production (a single `**` = 2 wildcard characters).
+  it("SECURITY (ReDoS): a glob AT the safe cap (2 wildcard groups) still compiles and matches NORMALLY (not the fail-safe path)", () => {
+    // Exactly 2 wildcard groups: at the cap, still safely compiled/evaluated — proves the cap is inclusive, not
+    // exclusive, and that ordinary (non-pathological) multi-wildcard globs keep their real matching semantics.
     const atCap = "src/*/*.ts";
     expect(matchesAny("src/a/f.ts", [atCap])).toBe(true);
     expect(matchesAny("src/a/f.js", [atCap])).toBe(false); // wrong extension — genuinely doesn't match
