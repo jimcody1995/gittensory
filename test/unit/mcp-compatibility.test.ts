@@ -8,9 +8,19 @@ describe("MCP compatibility telemetry", () => {
     expect(classifyMcpClientVersion("0.2.1")).toBe("incompatible");
     expect(classifyMcpClientVersion("0.3.0")).toBe("incompatible");
     expect(classifyMcpClientVersion("0.4.0")).toBe("incompatible");
-    expect(classifyMcpClientVersion("0.5.0")).toBe("current");
+    expect(classifyMcpClientVersion("0.5.0")).toBe("stale");
+    expect(classifyMcpClientVersion("0.5.9")).toBe("stale");
+    expect(classifyMcpClientVersion("0.6.0")).toBe("current");
+    expect(classifyMcpClientVersion("0.7.0")).toBe("current");
     expect(classifyMcpClientVersion("not-a-version")).toBe("unknown");
     expect(classifyMcpClientVersion(undefined)).toBe("unknown");
+    expect(classifyMcpClientVersion(null)).toBe("unknown");
+  });
+
+  it("treats prerelease builds below the minimum or recommended cutoffs as incompatible or stale", () => {
+    expect(classifyMcpClientVersion("0.4.9-rc.1")).toBe("incompatible");
+    expect(classifyMcpClientVersion("0.5.0-rc.1")).toBe("incompatible");
+    expect(classifyMcpClientVersion("0.6.0-rc.1")).toBe("stale");
   });
 
   it("builds bounded telemetry from allowlisted MCP headers", () => {
@@ -50,7 +60,7 @@ describe("MCP compatibility telemetry", () => {
       clientVersion: "0.5.0",
       metadata: {
         packageName: "@example/custom-mcp",
-        compatibilityStatus: "current",
+        compatibilityStatus: "stale",
       },
     });
   });
