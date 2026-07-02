@@ -12,11 +12,40 @@ function canonicalize(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
 }
 
+// globToRegExp's COMPILATION is linear-time, but the COMPILED pattern's .test() can be exponential-time on an
+// adversarial near-miss input when MULTIPLE `*` wildcards chain in one glob (empirically verified: 5 chained
+// wildcards against a 300-char adversarial input took ~19 SECONDS; 3 stays under 5ms at the same length).
+// hardGuardrailGlobs today are 100% hardcoded engine constants (see review/guardrail-config.ts) — no
+// maintainer/contributor input reaches globToRegExp via that path today — but it is also exported for reuse by
+// other maintainer-config-driven consumers (content-lane/spec-resolver.ts), so the cap lives INSIDE
+// globToRegExp itself (not just in a wrapper like matchesAny below) — every caller, present or future, direct
+// or indirect, is protected automatically rather than needing to separately remember the risk.
+const MAX_GLOB_WILDCARDS = 6;
+
+/** True if `glob` has more `*` wildcards than can be safely compiled to a RegExp without risking catastrophic
+ *  backtracking (see the MAX_GLOB_WILDCARDS rationale above). */
+function hasUnsafeWildcardCount(glob: string): boolean {
+  return (glob.match(/\*/g) ?? []).length > MAX_GLOB_WILDCARDS;
+}
+
+// A RegExp that never matches any input, at any position — the safe, conservative compiled form of an
+// over-complex glob. "Never matches" (not "matches everything") is the correct default HERE because
+// globToRegExp has no context on caller intent, and a false "matches everything" would be actively wrong for a
+// non-guardrail caller (e.g. content-lane file-scope matching, where "matches everything" would misclassify
+// every changed file as a registry submission). A caller whose OWN semantics want the opposite fail direction
+// (a security guardrail, where under-protection is worse than an unnecessary hold) checks hasUnsafeWildcardCount
+// itself and overrides — see matchesAny below.
+const NEVER_MATCHES = /^(?!)$/;
+
 /** Convert a path glob (`*` matches within a segment, `**` matches across `/`) to an anchored RegExp. The
  *  glob is canonicalized first, so matching is case-insensitive against a canonicalized path. Exported for
  *  reuse anywhere a maintainer-supplied path pattern needs compiling — never compile a raw regex string from
- *  config (ReDoS risk); this linear-time glob compiler is the one safe path pattern this codebase uses. */
+ *  config (ReDoS risk); this linear-time glob compiler is the one safe path pattern this codebase uses.
+ *
+ *  An over-complex glob (see MAX_GLOB_WILDCARDS) short-circuits to NEVER_MATCHES instead of being compiled —
+ *  this function never returns a RegExp that risks catastrophic backtracking on .test(), for any input. */
 export function globToRegExp(glob: string): RegExp {
+  if (hasUnsafeWildcardCount(glob)) return NEVER_MATCHES;
   const canonical = canonicalize(glob);
   let re = "";
   for (let i = 0; i < canonical.length; i += 1) {
@@ -38,27 +67,14 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
-// globToRegExp's COMPILATION is linear-time (its own docstring is correct about that), but the COMPILED
-// pattern's .test() can be exponential-time on an adversarial near-miss input when MULTIPLE `*` wildcards chain
-// in one glob (empirically verified: 5 chained wildcards against a 300-char adversarial input took ~19 SECONDS;
-// 3 stays under 5ms at the same length). hardGuardrailGlobs today are 100% hardcoded engine constants (see
-// review/guardrail-config.ts) — no maintainer/contributor input reaches this function today — but globToRegExp
-// is exported for reuse (content-lane/spec-resolver.ts), so this guards the function itself rather than relying
-// on every future caller to separately remember the risk.
-const MAX_GLOB_WILDCARDS = 6;
-
-/** True if `glob` has more `*` wildcards than can be safely compiled to a RegExp without risking catastrophic
- *  backtracking (see the MAX_GLOB_WILDCARDS rationale above). */
-function hasUnsafeWildcardCount(glob: string): boolean {
-  return (glob.match(/\*/g) ?? []).length > MAX_GLOB_WILDCARDS;
-}
-
 /**
  * True if `path` matches any of the globs (`*` within a segment, `**` across `/`), case-insensitively. A glob
  * with more wildcards than can be safely compiled (see hasUnsafeWildcardCount) is treated as matching EVERY
  * path — fail SAFE TOWARD GUARDING, mirroring isGuardrailHit's own "unknown ⇒ treat as a hit" philosophy (an
- * over-complex guardrail glob still forces manual review) rather than silently never matching, which would
- * silently disable the maintainer's intended protection — the worse failure mode for a safety guardrail.
+ * over-complex guardrail glob still forces manual review) rather than the NEVER_MATCHES default globToRegExp
+ * itself falls back to, which would silently disable the maintainer's intended protection — the worse failure
+ * mode for a safety guardrail specifically (see globToRegExp's own docstring for why NEVER_MATCHES is still the
+ * right default for globToRegExp as a general-purpose compiler).
  */
 export function matchesAny(path: string, globs: string[]): boolean {
   const canonicalPath = canonicalize(path);

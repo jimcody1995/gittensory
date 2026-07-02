@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { changedPathsHittingGuardrail, isGuardrailHit, matchesAny } from "../../src/signals/change-guardrail";
+import { changedPathsHittingGuardrail, globToRegExp, isGuardrailHit, matchesAny } from "../../src/signals/change-guardrail";
+
+describe("globToRegExp (the exported compiler itself — must be safe for ANY direct caller, not just matchesAny)", () => {
+  it("compiles an ordinary glob to a working anchored RegExp", () => {
+    expect(globToRegExp("scripts/**").test("scripts/build.mjs")).toBe(true);
+    expect(globToRegExp("src/*.ts").test("src/auth.ts")).toBe(true);
+    expect(globToRegExp("src/*.ts").test("src/auth/session.ts")).toBe(false);
+  });
+
+  it("SECURITY (ReDoS): called DIRECTLY (bypassing matchesAny entirely) on a pathological glob, resolves instantly and matches nothing — the cap lives inside the compiler itself, not just in matchesAny's wrapper", () => {
+    const pathological = "src/*-*-*-*-*-*-*-final.ts";
+    const start = Date.now();
+    const compiled = globToRegExp(pathological);
+    expect(compiled.test("completely/unrelated/path.md")).toBe(false);
+    expect(compiled.test("")).toBe(false);
+    expect(compiled.test("src/a-b-c-d-e-f-g-final.ts")).toBe(false); // even a "near miss" that would otherwise match
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  it("a glob AT the safe cap (6 wildcards), called directly, still compiles and matches normally", () => {
+    const atCap = "src/*/*/*/*/*/*.ts";
+    expect(globToRegExp(atCap).test("src/a/b/c/d/e/f.ts")).toBe(true);
+    expect(globToRegExp(atCap).test("src/a/b/c/d/e/f.js")).toBe(false);
+  });
+});
 
 describe("change-guardrail glob matching", () => {
   it("`**` matches across path separators (a guarded dir guards its whole subtree)", () => {
