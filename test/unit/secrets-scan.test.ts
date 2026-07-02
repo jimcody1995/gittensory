@@ -48,4 +48,43 @@ describe("scanForSecrets — deterministic secret-pattern scanner", () => {
     expect(r.found).toBe(true);
     expect(r.kinds).toEqual(expect.arrayContaining(["github_token", "aws_access_key"]));
   });
+
+  // #2553: widened to match review-enrichment/src/analyzers/secret-scan.ts's richer rule set.
+  it("flags a Google API key", () => {
+    const fakeKey = "AIza" + "SyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456";
+    expect(scanForSecrets(fakeKey).kinds).toContain("google_api_key");
+  });
+
+  it("flags a JWT", () => {
+    const fakeJwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    expect(scanForSecrets(fakeJwt).kinds).toContain("jwt");
+  });
+
+  it("flags a generic secret/password/token assignment with a high-entropy value", () => {
+    const fakeSecret = "sk_live_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567";
+    expect(scanForSecrets(`secret = "${fakeSecret}"`).kinds).toContain("generic_secret_assignment");
+    expect(scanForSecrets(`password: "${fakeSecret}"`).kinds).toContain("generic_secret_assignment");
+    expect(scanForSecrets(`client_secret = "${fakeSecret}"`).kinds).toContain("generic_secret_assignment");
+    expect(scanForSecrets(`api_key: '${fakeSecret}'`).kinds).toContain("generic_secret_assignment");
+  });
+
+  it("does NOT flag a Zod/type schema field declaration with no literal value", () => {
+    expect(scanForSecrets('password: z.string()').kinds).not.toContain("generic_secret_assignment");
+    expect(scanForSecrets("type Config = { secretKey: string; apiKey?: string }").kinds).not.toContain("generic_secret_assignment");
+  });
+
+  it.each([
+    ["xxx", 'token = "xxx"'],
+    ["placeholder phrase", 'secret = "your-api-key-placeholder"'],
+    ["angle-bracket placeholder", 'password: "<REDACTED-VALUE-HERE>"'],
+    ["changeme", 'client_secret: "changeme-please-changeme"'],
+    ["repeated-character filler", 'api_key = "xxxxxxxxxxxxxxxxxxxx"'],
+    ["your- prefix", 'token: "your-secret-token-value"'],
+  ])("does NOT flag a redacted/placeholder value: %s", (_name, snippet) => {
+    expect(scanForSecrets(snippet).kinds).not.toContain("generic_secret_assignment");
+  });
+
+  it("does NOT flag a short value under the 16-character floor", () => {
+    expect(scanForSecrets('token = "short12345"').kinds).not.toContain("generic_secret_assignment");
+  });
 });
