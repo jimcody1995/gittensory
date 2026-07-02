@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFocusManifestGuidance,
   compileFocusManifestPolicy,
+  contentLaneConfigToJson,
   deriveContributionLanes,
   featuresConfigToJson,
   gateConfigToJson,
@@ -482,6 +483,7 @@ describe("compileFocusManifestPolicy", () => {
       settings: {},
       review: { present: false, footerText: null, note: null, fields: {}, profile: null, inlineComments: null, pathInstructions: [], instructions: null, excludePaths: [], preMergeChecks: [] },
       features: { present: false, rag: null, reputation: null, unifiedComment: null, safety: null },
+      contentLane: { present: false, entryFileGlob: null, providerFileGlob: null, artifactGlob: null, collectionField: null, maxAppendedEntries: null, duplicateKeyFields: [], validatorId: null },
       warnings: [],
     });
     expect(policy.publicSafe.entryGuidance).toContain("Keep PRs focused.");
@@ -1019,6 +1021,99 @@ describe("parseFocusManifest gate config", () => {
     // An empty features block leaves the manifest absent (no recognized fields).
     expect(parseFocusManifest({ features: {} }).features.present).toBe(false);
     expect(featuresConfigToJson(parseFocusManifest({ features: {} }).features)).toBeNull();
+  });
+
+  it("parses the contentLane: block (#2435 per-repo registry-lane config), round-trips it, and makes the manifest present", () => {
+    const m = parseFocusManifest({
+      contentLane: {
+        entryFileGlob: "registry/items/*.json",
+        providerFileGlob: "registry/providers/*.json",
+        artifactGlob: "public/**/*.json",
+        collectionField: "items",
+        maxAppendedEntries: 5,
+        duplicateKeyFields: ["url"],
+        validatorId: "acme-registry",
+      },
+    });
+    expect(m.present).toBe(true);
+    expect(m.contentLane).toEqual({
+      present: true,
+      entryFileGlob: "registry/items/*.json",
+      providerFileGlob: "registry/providers/*.json",
+      artifactGlob: "public/**/*.json",
+      collectionField: "items",
+      maxAppendedEntries: 5,
+      duplicateKeyFields: ["url"],
+      validatorId: "acme-registry",
+    });
+    // Round-trips through contentLaneConfigToJson → parseFocusManifest unchanged.
+    expect(parseFocusManifest({ contentLane: contentLaneConfigToJson(m.contentLane) }).contentLane).toEqual(m.contentLane);
+  });
+
+  it("requires BOTH entryFileGlob and collectionField for contentLane: — a partial config warns and is ignored (not a broken half-spec)", () => {
+    const missingCollectionField = parseFocusManifest({ contentLane: { entryFileGlob: "registry/*.json" } });
+    expect(missingCollectionField.contentLane.present).toBe(false);
+    expect(missingCollectionField.warnings.some((w) => /contentLane.*requires both/.test(w))).toBe(true);
+    const missingEntryFileGlob = parseFocusManifest({ contentLane: { collectionField: "items" } });
+    expect(missingEntryFileGlob.contentLane.present).toBe(false);
+    expect(missingEntryFileGlob.warnings.some((w) => /contentLane.*requires both/.test(w))).toBe(true);
+    // The whole manifest stays absent when contentLane is the ONLY (incomplete) field set.
+    expect(missingCollectionField.present).toBe(false);
+  });
+
+  it("contentLane: a non-mapping value warns and is ignored; a non-positive maxAppendedEntries warns and is dropped", () => {
+    expect(parseFocusManifest({ contentLane: ["nope"] }).warnings.some((w) => /"contentLane" must be a mapping/.test(w))).toBe(true);
+    const m = parseFocusManifest({
+      contentLane: { entryFileGlob: "registry/*.json", collectionField: "items", maxAppendedEntries: -1 },
+    });
+    expect(m.contentLane.maxAppendedEntries).toBeNull();
+    expect(m.warnings.some((w) => /contentLane\.maxAppendedEntries/.test(w))).toBe(true);
+  });
+
+  it("contentLane: a FRACTIONAL maxAppendedEntries is rejected (would render a broken 'append between 1 and 2.5 entries' message downstream)", () => {
+    const m = parseFocusManifest({
+      contentLane: { entryFileGlob: "registry/*.json", collectionField: "items", maxAppendedEntries: 2.5 },
+    });
+    expect(m.contentLane.maxAppendedEntries).toBeNull();
+    expect(m.warnings.some((w) => /contentLane\.maxAppendedEntries.*whole number/.test(w))).toBe(true);
+    // A clean positive integer still passes through unchanged.
+    expect(
+      parseFocusManifest({ contentLane: { entryFileGlob: "registry/*.json", collectionField: "items", maxAppendedEntries: 5 } }).contentLane
+        .maxAppendedEntries,
+    ).toBe(5);
+  });
+
+  it("contentLane: glob fields are truncated at MAX_ITEM_LENGTH like any other string field", () => {
+    const overLong = "registry/" + "a".repeat(400) + ".json";
+    const m = parseFocusManifest({ contentLane: { entryFileGlob: overLong, collectionField: "items" } });
+    expect(m.contentLane.entryFileGlob?.length).toBeLessThanOrEqual(300);
+    expect(m.warnings.some((w) => /contentLane\.entryFileGlob.*truncated/.test(w))).toBe(true);
+  });
+
+  it("SECURITY (ReDoS): a glob with too many wildcards is REJECTED at parse time rather than ever reaching RegExp compilation", () => {
+    // 5 chained single-segment wildcards is empirically catastrophic against an adversarial input (verified
+    // ~19s in manual testing) — must never survive parsing to reach globToRegExp at all.
+    const pathological = "registry/*-*-*-*-*-final.json";
+    const m = parseFocusManifest({ contentLane: { entryFileGlob: pathological, collectionField: "items" } });
+    expect(m.contentLane.entryFileGlob).toBeNull();
+    expect(m.contentLane.present).toBe(false); // entryFileGlob is REQUIRED — a rejected glob degrades to absent
+    expect(m.warnings.some((w) => /contentLane\.entryFileGlob.*too many wildcards/.test(w))).toBe(true);
+    // A glob AT the cap (3 wildcards) is accepted; the optional providerFileGlob/artifactGlob fields are dropped
+    // individually (with a warning) without invalidating the whole block, since only entryFileGlob/collectionField
+    // are required.
+    const atCap = parseFocusManifest({
+      contentLane: { entryFileGlob: "registry/*/*/*.json", providerFileGlob: "providers/*-*-*-*-*.json", collectionField: "items" },
+    });
+    expect(atCap.contentLane.present).toBe(true);
+    expect(atCap.contentLane.entryFileGlob).toBe("registry/*/*/*.json");
+    expect(atCap.contentLane.providerFileGlob).toBeNull();
+    expect(atCap.warnings.some((w) => /contentLane\.providerFileGlob.*too many wildcards/.test(w))).toBe(true);
+  });
+
+  it("contentLaneConfigToJson returns null for an absent config, and omits unset optional fields", () => {
+    expect(contentLaneConfigToJson(parseFocusManifest(null).contentLane)).toBeNull();
+    const m = parseFocusManifest({ contentLane: { entryFileGlob: "registry/*.json", collectionField: "items" } });
+    expect(contentLaneConfigToJson(m.contentLane)).toEqual({ entryFileGlob: "registry/*.json", collectionField: "items" });
   });
 
   it("parses aiReviewAllAuthors from the settings: block (generic override)", () => {

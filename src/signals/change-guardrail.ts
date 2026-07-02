@@ -13,8 +13,10 @@ function canonicalize(value: string): string {
 }
 
 /** Convert a path glob (`*` matches within a segment, `**` matches across `/`) to an anchored RegExp. The
- *  glob is canonicalized first, so matching is case-insensitive against a canonicalized path. */
-function globToRegExp(glob: string): RegExp {
+ *  glob is canonicalized first, so matching is case-insensitive against a canonicalized path. Exported for
+ *  reuse anywhere a maintainer-supplied path pattern needs compiling — never compile a raw regex string from
+ *  config (ReDoS risk); this linear-time glob compiler is the one safe path pattern this codebase uses. */
+export function globToRegExp(glob: string): RegExp {
   const canonical = canonicalize(glob);
   let re = "";
   for (let i = 0; i < canonical.length; i += 1) {

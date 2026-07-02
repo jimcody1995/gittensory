@@ -1,13 +1,16 @@
-// Content/registry surface-lane HOST ADAPTER (#1255 convergence). `runSurfaceReview` is a pure, AI-FREE,
-// structured-data adjudicator for registry-submission PRs (metagraphed's surfaces[]/providers/candidates). This
-// file is the thin host wiring that lets its deterministic verdict drive the SAME gate disposition (check-run +
-// auto-action + public comment) the generic gate produces: the flag + per-repo allowlist guard, the GitHub-backed
-// loadFile, and the verdict → GateCheckEvaluation conversion.
+// Content/registry surface-lane HOST ADAPTER (#1255 convergence, spec resolution #2435). `runSurfaceReview` is a
+// pure, AI-FREE, structured-data adjudicator for registry-submission PRs. This file is the thin host wiring that
+// lets its deterministic verdict drive the SAME gate disposition (check-run + auto-action + public comment) the
+// generic gate produces: the flag + per-repo RegistryLaneSpec resolution, the GitHub-backed loadFile, and the
+// verdict → GateCheckEvaluation conversion.
 //
-// FLAG-GATED + DEFAULT-OFF: GITTENSORY_REVIEW_CONTENT_LANE must be truthy AND the repo must be in the per-repo
-// GITTENSORY_REVIEW_REPOS cutover allowlist. When off (the default) the caller takes no new branch, runs no
-// fetch, and `gateEvaluation` is byte-identical to today. The verdict NEVER depends on an AI model, so this is
-// independent of the AI-reviewer accuracy work (the surface lane emits none of the AI_JUDGMENT_BLOCKER_CODES).
+// FLAG-GATED + DEFAULT-OFF: GITTENSORY_REVIEW_CONTENT_LANE must be truthy, AND `resolveRegistryLaneSpec`
+// (content-lane/spec-resolver.ts) must resolve a spec for this repo — either an explicit per-repo `.gittensory.yml`
+// `contentLane:` config, or (today's zero-config default) the repo being in the GITTENSORY_REVIEW_REPOS cutover
+// allowlist, which resolves to METAGRAPHED_LANE_SPEC. When off / unresolved (the default for any repo that hasn't
+// opted in) the caller takes no new branch, runs no fetch, and `gateEvaluation` is byte-identical to today. The
+// verdict NEVER depends on an AI model, so this is independent of the AI-reviewer accuracy work (the surface lane
+// emits none of the AI_JUDGMENT_BLOCKER_CODES).
 //
 // SAFETY (three deliberate guards):
 //  1. A generic HARD (non-AI-judgment) blocker — e.g. a committed secret detected before this runs — is PRESERVED:
@@ -22,27 +25,20 @@
 //     adjudicator for this structured data — an AI opinion has no standing to veto it, only a real deterministic
 //     blocker does (see guard #1).
 import { AI_JUDGMENT_BLOCKER_CODES, type GateCheckEvaluation, isAiJudgmentOnlyFailure } from "../rules/advisory";
-import type { AdvisoryFinding, AdvisorySeverity } from "../types";
-import { type ContentLaneEnv, isContentLaneEnabled } from "./content-lane/flag";
+import { isContentLaneEnabled } from "./content-lane/flag";
 import { runSurfaceReview, type SurfaceReviewInput, type SurfaceReviewResult } from "./content-lane/orchestrator";
-import { METAGRAPHED_LANE_SPEC } from "./content-lane/registry-logic";
-import { isConvergenceRepoAllowed } from "./cutover-gate";
+import type { RegistryLaneSpec } from "./content-lane/registry-logic";
+import { resolveRegistryLaneSpec } from "./content-lane/spec-resolver";
 import { makeGithubFileFetcher } from "./grounding-wire";
+import type { FocusManifest } from "../signals/focus-manifest";
+import { loadRepoFocusManifest } from "../signals/focus-manifest-loader";
+import type { AdvisoryFinding, AdvisorySeverity } from "../types";
 
 // Deterministic surface-lane finding codes. DELIBERATELY NOT in AI_JUDGMENT_BLOCKER_CODES; surface closes are
 // facts, and blocker findings must never be flipped to merge by green CI.
 const SURFACE_REJECT_CODE = "surface_lane_reject";
 const SURFACE_MANUAL_CODE = "surface_lane_manual";
 const SURFACE_TITLE = "Registry surface review";
-
-/** True when the deterministic surface lane should drive the gate for `repoFullName`: the flag is on AND the
- *  repo is in the per-repo cutover allowlist. Flag-OFF (default) ⇒ the caller takes no new branch. */
-export function isContentLaneWired(
-  env: ContentLaneEnv & { GITTENSORY_REVIEW_REPOS?: string | undefined },
-  repoFullName: string,
-): boolean {
-  return isContentLaneEnabled(env) && isConvergenceRepoAllowed(env, repoFullName);
-}
 
 function surfaceFinding(code: string, severity: AdvisorySeverity, summary: string): AdvisoryFinding {
   return { code, title: SURFACE_TITLE, severity, detail: summary, publicText: summary };
@@ -106,14 +102,16 @@ export function applySurfaceGate(
   };
 }
 
-/** Run the deterministic surface review for a registry-submission PR and return its gate evaluation, or `null`
- *  to defer to the generic gate (not a submission, or an unreadable file — see below). Mutates `advisory.findings`
- *  so the reason renders in the unified public comment. NEVER throws on a fetch blip — the file fetcher is
- *  fail-safe. `loadFileOverride` is injected by unit tests; production builds a lazy GitHub-Contents-backed loader
- *  so a non-submission PR (the common case) pays for no fetch at all. `files` carries each changed file's GitHub
+/** Run the deterministic surface review for a registry-submission PR against `spec` (the caller's already-resolved
+ *  RegistryLaneSpec — see `resolveRegistryLaneSpec`) and return its gate evaluation, or `null` to defer to the
+ *  generic gate (not a submission, or an unreadable file — see below). Mutates `advisory.findings` so the reason
+ *  renders in the unified public comment. NEVER throws on a fetch blip — the file fetcher is fail-safe.
+ *  `loadFileOverride` is injected by unit tests; production builds a lazy GitHub-Contents-backed loader so a
+ *  non-submission PR (the common case) pays for no fetch at all. `files` carries each changed file's GitHub
  *  status so a null BASE read can be told apart from an absent base (see the defer guard). */
-export async function runMetagraphedSurfaceGate(
+export async function runRegistrySurfaceGate(
   env: Env,
+  spec: RegistryLaneSpec,
   args: {
     installationId: number | null | undefined;
     repoFullName: string;
@@ -138,12 +136,13 @@ export async function runMetagraphedSurfaceGate(
     // null read is a transient fetch blip, NOT an absent base) — would make a valid submission read as empty/
     // invalid → a spurious one-shot close. Defer to the generic gate instead. A null base for an ADDED file is
     // the expected brand-new-entry case and is left to the orchestrator, whose spec-driven entry-count policy
-    // decides the verdict (METAGRAPHED_LANE_SPEC allows any number of clean entries — see maxAppendedEntries).
+    // decides the verdict (the resolved spec's own maxAppendedEntries — e.g. METAGRAPHED_LANE_SPEC allows any
+    // number of clean entries).
     if (ref === "head" && content === null) deferUnreadable = true;
     if (ref === "base" && content === null && statusByPath.get(path) === "modified") deferUnreadable = true;
     return content;
   };
-  const result = await runSurfaceReview(METAGRAPHED_LANE_SPEC, {
+  const result = await runSurfaceReview(spec, {
     changedFiles: args.files.map((file) => file.path),
     loadFile,
     opts: { secretsScan: true, sourceUrlValidation: true },
@@ -165,9 +164,12 @@ export function resolveSurfaceRefs(
   return { headSha: pr.headSha ?? "", baseRef: pr.baseRef ?? repo?.defaultBranch ?? "" };
 }
 
-/** The processor SEAM in one testable call: when the surface lane is wired for this repo, run it and merge its
- *  verdict onto the generic gate (preserving generic hard blockers); otherwise return the generic evaluation
- *  unchanged. `getChangedFiles` is a thunk so an unwired repo resolves no files (no extra diff load).
+/** The processor SEAM in one testable call: when a RegistryLaneSpec resolves for this repo (see
+ *  `resolveRegistryLaneSpec` — an explicit per-repo `.gittensory.yml` `contentLane:` config, or the
+ *  GITTENSORY_REVIEW_REPOS allowlist default), run the surface lane against it and merge its verdict onto the
+ *  generic gate (preserving generic hard blockers); otherwise return the generic evaluation unchanged.
+ *  `getChangedFiles` is a thunk so an unresolved repo resolves no files (no extra diff load). The env kill-switch
+ *  is checked BEFORE loading the manifest, so a globally-disabled lane pays no manifest-load I/O either.
  *
  *  When `applySurfaceGate`'s AI-judgment override fires (an AI-judgment-only generic failure is overridden by a
  *  decisive surface merge), the AI-judgment finding(s) are ALSO removed from `args.advisory.findings` — that
@@ -175,7 +177,12 @@ export function resolveSurfaceRefs(
  *  (src/review/unified-comment-bridge.ts) to render the "Code review" reviewer note, bypassing the gate
  *  evaluation entirely. Without this cleanup, the public comment would still show "Concerns raised — review
  *  before merging" quoting the overridden AI defect even though the gate the same comment reports is a clean
- *  merge — a visible, confusing contradiction of the override this function just made. */
+ *  merge — a visible, confusing contradiction of the override this function just made.
+ *
+ *  `loadManifestOverride` is injected by unit tests (mirrors `runRegistrySurfaceGate`'s `loadFileOverride`) so
+ *  they never hit the real cached-manifest loader's D1/network I/O; production omits it and gets the real,
+ *  cached `loadRepoFocusManifest`. A manifest-load failure degrades to null (the allowlist-default resolution
+ *  path), never a thrown error. */
 export async function evaluateWithSurfaceLane(
   env: Env,
   repoFullName: string,
@@ -188,9 +195,14 @@ export async function evaluateWithSurfaceLane(
     advisory: { findings: AdvisoryFinding[] };
     getChangedFiles: () => Promise<{ path: string; status?: string | null | undefined }[]>;
   },
+  loadManifestOverride?: (env: Env, repoFullName: string) => Promise<FocusManifest>,
 ): Promise<GateCheckEvaluation | undefined> {
-  if (!gateEnabled || !isContentLaneWired(env, repoFullName)) return gateEvaluation;
-  const surfaceGate = await runMetagraphedSurfaceGate(env, {
+  if (!gateEnabled || !isContentLaneEnabled(env)) return gateEvaluation;
+  const loadManifest = loadManifestOverride ?? loadRepoFocusManifest;
+  const manifest = await loadManifest(env, repoFullName).catch(() => null);
+  const spec = resolveRegistryLaneSpec(env, manifest, repoFullName);
+  if (!spec) return gateEvaluation;
+  const surfaceGate = await runRegistrySurfaceGate(env, spec, {
     installationId: args.installationId,
     repoFullName,
     pr: resolveSurfaceRefs(args.pr, args.repo),
