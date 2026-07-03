@@ -48,6 +48,7 @@ gittensory-mcp init-client --print codex
 gittensory-mcp init-client --print claude
 gittensory-mcp init-client --print cursor
 gittensory-mcp init-client --print vscode
+gittensory-mcp init-client --print zed
 gittensory-mcp init-client --print codex --agent-profile miner-planner
 gittensory-mcp completion bash
 gittensory-mcp completion zsh
@@ -160,7 +161,7 @@ The same capabilities are exposed to MCP clients as:
 
 ### Client config
 
-`init-client --print <host>` prints the stdio MCP config for a host: `codex` (TOML), `claude`, `cursor`, and `mcp` (the shared `mcpServers` JSON shape), and `vscode` (VS Code's native `servers` map with `"type": "stdio"`, for `.vscode/mcp.json`). It prints config only; it never edits client files.
+`init-client --print <host>` prints the stdio MCP config for a host: `codex` (TOML), `claude`, `cursor`, and `mcp` (the shared `mcpServers` JSON shape), `vscode` (VS Code's native `servers` map with `"type": "stdio"`, for `.vscode/mcp.json`), and `zed` (Zed's `context_servers` map in `settings.json`). It prints config only; it never edits client files.
 
 ### Agent profiles
 

@@ -34,6 +34,12 @@ describe("gittensory-mcp CLI — basics", () => {
     expect(vscode.snippet).toContain('"type": "stdio"');
     expect(vscode.snippet).toContain('"gittensory"');
     expect(vscode.snippet).not.toContain('"mcpServers"');
+
+    const zed = JSON.parse(run(["init-client", "--print", "zed", "--json"])) as { snippet: string };
+    expect(zed.snippet).toContain('"context_servers"');
+    expect(zed.snippet).toContain('"gittensory"');
+    expect(zed.snippet).toContain('"args": ["--stdio"]');
+    expect(zed.snippet).not.toContain('"mcpServers"');
   });
 
   it("prints human-approved agent profile instructions for supported MCP clients", () => {
