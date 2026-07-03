@@ -107,14 +107,17 @@ gittensory-mcp preflight --login your-login --json`}
 
       <h2>Maintainer journey</h2>
       <p>
-        Maintainers install the GitHub App, configure per-repo policy, preview what could appear on
-        a confirmed-miner PR, then pull context on demand.
+        Maintainers self-host the review stack and install a GitHub App, configure per-repo policy,
+        preview what could appear on a confirmed-miner PR, then pull context on demand.
       </p>
       <ol>
         <li>
-          <strong>Install the GitHub App.</strong> Choose repositories and approve permissions —
-          default posture is silence. Start with the{" "}
-          <Link to="/docs/github-app">GitHub App first-10-minutes checklist</Link>.
+          <strong>Self-host, then install your own App.</strong> Choose repositories and approve
+          permissions — default posture is silence. Start with{" "}
+          <Link to="/docs/maintainer-self-hosting">self-hosting setup</Link>, which covers the
+          direct App's install checklist, then{" "}
+          <Link to="/docs/github-app">GitHub App configuration</Link> for the review behavior (PR
+          panel, checks, gate modes).
         </li>
         <li>
           <strong>Configure settings.</strong> Opt in to at most one configured label and one sticky
@@ -241,7 +244,8 @@ GET /v1/readiness`}
           <Link to="/docs/miner-workflow">Miner workflow</Link>
         </li>
         <li>
-          Maintainers: <Link to="/docs/github-app">GitHub App</Link> →{" "}
+          Maintainers: <Link to="/docs/maintainer-self-hosting">Self-hosting</Link> →{" "}
+          <Link to="/docs/github-app">GitHub App</Link> →{" "}
           <Link to="/docs/maintainer-workflow">Maintainer workflow</Link>
         </li>
         <li>

@@ -10,7 +10,7 @@ export const Route = createFileRoute("/docs/maintainer-install-trust")({
       {
         name: "description",
         content:
-          "Install Gittensory as a maintainer, verify trust boundaries, preview public output, and decide when GitHub App checks are safe to enable.",
+          "Self-host and install a Gittensory GitHub App as a maintainer, verify trust boundaries, preview public output, and decide when GitHub App checks are safe to enable. Self-hosting is the recommended default path; the shared App is private managed-beta only.",
       },
       {
         property: "og:title",
@@ -19,7 +19,7 @@ export const Route = createFileRoute("/docs/maintainer-install-trust")({
       {
         property: "og:description",
         content:
-          "Install Gittensory as a maintainer, verify trust boundaries, preview public output, and decide when GitHub App checks are safe to enable.",
+          "Self-host and install a Gittensory GitHub App as a maintainer, verify trust boundaries, preview public output, and decide when GitHub App checks are safe to enable. Self-hosting is the recommended default path; the shared App is private managed-beta only.",
       },
       { property: "og:url", content: "/docs/maintainer-install-trust" },
     ],
@@ -33,7 +33,7 @@ function MaintainerInstallTrust() {
     <DocsPage
       eyebrow="Launch guide"
       title="Maintainer install and trust guide"
-      description="A maintainer-first checklist for installing the GitHub App, keeping public output safe, authorizing commands, using the browser extension, and rejecting weak Gittensory-driven PRs."
+      description="A maintainer-first checklist for self-hosting and installing a GitHub App, keeping public output safe, authorizing commands, using the browser extension, and rejecting weak Gittensory-driven PRs."
     >
       <Callout variant="safety" title="Trust posture">
         Gittensory is advisory-first. It may help you review contribution readiness, but it does not
@@ -41,10 +41,18 @@ function MaintainerInstallTrust() {
         payout, wallet, hotkey, or trust-score claims in public surfaces.
       </Callout>
 
-      <h2>Install the GitHub App</h2>
+      <h2>Install the App</h2>
       <p>
-        Start from <Link to="/docs/github-app">GitHub App setup</Link>, then keep the first rollout
-        narrow until the repo owner has verified permissions, webhook delivery, and public copy.
+        <strong>Self-hosting is the recommended, default path.</strong> Start from{" "}
+        <Link to="/docs/maintainer-self-hosting">self-hosting setup</Link> — the direct App's
+        required permissions and events are covered in{" "}
+        <Link to="/docs/self-hosting-github-app">GitHub App and Orb</Link>, not the checklist below.
+        Either way, keep the first rollout narrow until the repo owner has verified permissions,
+        webhook delivery, and public copy.
+      </p>
+      <p>
+        The checklist below is for the shared <strong>private / managed-beta only</strong> App — see{" "}
+        <Link to="/docs/github-app">GitHub App configuration</Link> for the install flow.
       </p>
       <ol>
         <li>Install Gittensory on one test repository or a selected repository set.</li>
@@ -62,6 +70,11 @@ function MaintainerInstallTrust() {
           preview output matches the repo's maintainer policy.
         </li>
       </ol>
+      <Callout variant="note">
+        A self-hosted direct App needs <code>Pull requests: write</code> (not read) and{" "}
+        <code>Checks: write</code> is mandatory, not optional — this checklist's permissions are
+        scoped to the shared managed-beta App only.
+      </Callout>
       <CodeBlock
         lang="http"
         code={`GET /v1/installations

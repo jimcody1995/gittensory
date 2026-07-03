@@ -57,6 +57,7 @@ import {
   upstreamSourceSnapshots,
   webhookEvents,
 } from "./schema";
+import { MAX_REVIEW_NAG_COOLDOWN_DAYS } from "../settings/agent-actions";
 import type {
   Advisory,
   AdvisoryFinding,
@@ -513,6 +514,10 @@ export async function getRepositorySettings(env: Env, fullName: string): Promise
       requireFreshRebaseWindowMinutes: null,
       accountAgeThresholdDays: null,
       newAccountLabel: "new-account",
+      commandRateLimitPolicy: "off",
+      commandRateLimitMaxPerWindow: 20,
+      commandRateLimitAiMaxPerWindow: 5,
+      commandRateLimitWindowHours: 24,
     };
   }
   return {
@@ -562,12 +567,16 @@ export async function getRepositorySettings(env: Env, fullName: string): Promise
     contributorCapLabel: row.contributorCapLabel,
     reviewNagPolicy: normalizeReviewNagPolicy(row.reviewNagPolicy),
     reviewNagMaxPings: normalizePositiveIntWithDefault(row.reviewNagMaxPings, 3),
-    reviewNagCooldownDays: normalizePositiveIntWithDefault(row.reviewNagCooldownDays, 5),
+    reviewNagCooldownDays: normalizeReviewNagCooldownDays(row.reviewNagCooldownDays, 5),
     reviewNagLabel: row.reviewNagLabel,
     autoCloseExemptLogins: parseAutoCloseExemptLogins(row.autoCloseExemptLoginsJson),
     requireFreshRebaseWindowMinutes: normalizeOpenItemCap(row.requireFreshRebaseWindowMinutes),
     accountAgeThresholdDays: normalizeOpenItemCap(row.accountAgeThresholdDays),
     newAccountLabel: row.newAccountLabel,
+    commandRateLimitPolicy: normalizeCommandRateLimitPolicy(row.commandRateLimitPolicy),
+    commandRateLimitMaxPerWindow: normalizePositiveIntWithDefault(row.commandRateLimitMaxPerWindow, 20),
+    commandRateLimitAiMaxPerWindow: normalizePositiveIntWithDefault(row.commandRateLimitAiMaxPerWindow, 5),
+    commandRateLimitWindowHours: normalizePositiveIntWithDefault(row.commandRateLimitWindowHours, 24),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -649,12 +658,16 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
     contributorCapLabel: settings.contributorCapLabel ?? "over-contributor-limit",
     reviewNagPolicy: normalizeReviewNagPolicy(settings.reviewNagPolicy),
     reviewNagMaxPings: normalizePositiveIntWithDefault(settings.reviewNagMaxPings, 3),
-    reviewNagCooldownDays: normalizePositiveIntWithDefault(settings.reviewNagCooldownDays, 5),
+    reviewNagCooldownDays: normalizeReviewNagCooldownDays(settings.reviewNagCooldownDays, 5),
     reviewNagLabel: settings.reviewNagLabel ?? "review-nag-cooldown",
     autoCloseExemptLogins: normalizeAutoCloseExemptLogins(settings.autoCloseExemptLogins).logins,
     requireFreshRebaseWindowMinutes: normalizeOpenItemCap(settings.requireFreshRebaseWindowMinutes),
     accountAgeThresholdDays: normalizeOpenItemCap(settings.accountAgeThresholdDays),
     newAccountLabel: settings.newAccountLabel ?? "new-account",
+    commandRateLimitPolicy: normalizeCommandRateLimitPolicy(settings.commandRateLimitPolicy),
+    commandRateLimitMaxPerWindow: normalizePositiveIntWithDefault(settings.commandRateLimitMaxPerWindow, 20),
+    commandRateLimitAiMaxPerWindow: normalizePositiveIntWithDefault(settings.commandRateLimitAiMaxPerWindow, 5),
+    commandRateLimitWindowHours: normalizePositiveIntWithDefault(settings.commandRateLimitWindowHours, 24),
   };
   const db = getDb(env.DB);
   await db
@@ -712,6 +725,10 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
       requireFreshRebaseWindowMinutes: resolved.requireFreshRebaseWindowMinutes,
       accountAgeThresholdDays: resolved.accountAgeThresholdDays,
       newAccountLabel: resolved.newAccountLabel,
+      commandRateLimitPolicy: resolved.commandRateLimitPolicy,
+      commandRateLimitMaxPerWindow: resolved.commandRateLimitMaxPerWindow,
+      commandRateLimitAiMaxPerWindow: resolved.commandRateLimitAiMaxPerWindow,
+      commandRateLimitWindowHours: resolved.commandRateLimitWindowHours,
       updatedAt: nowIso(),
     })
     .onConflictDoUpdate({
@@ -770,6 +787,10 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
         requireFreshRebaseWindowMinutes: resolved.requireFreshRebaseWindowMinutes,
         accountAgeThresholdDays: resolved.accountAgeThresholdDays,
         newAccountLabel: resolved.newAccountLabel,
+        commandRateLimitPolicy: resolved.commandRateLimitPolicy,
+        commandRateLimitMaxPerWindow: resolved.commandRateLimitMaxPerWindow,
+        commandRateLimitAiMaxPerWindow: resolved.commandRateLimitAiMaxPerWindow,
+        commandRateLimitWindowHours: resolved.commandRateLimitWindowHours,
         updatedAt: nowIso(),
       },
     });
@@ -2293,6 +2314,36 @@ export async function countRecentAuditEventsForActorAndTarget(env: Env, actor: s
   return row.count;
 }
 
+/** Whether `deliveryId` has ALREADY been recorded for this (actor, eventType, targetKey) within `sinceIso` --
+ *  makes a counting/rate-limit check idempotent against a REDELIVERED or retried webhook event (GitHub can
+ *  and does redeliver the same issue_comment event), which would otherwise increment the counter twice for
+ *  one real invocation and can incorrectly rate-limit it (#2560). Scoped to a short recent window, not the
+ *  full rate-limit window -- a genuine redelivery lands within seconds, not hours later.
+ *  Gate review finding: an earlier version matched deliveryId IN MEMORY over a `.limit(50)` slice with no
+ *  ORDER BY -- once an actor accumulated more than 50 matching rows within the window (a burst/spam scenario,
+ *  exactly what this feature exists to handle), the row carrying the original deliveryId could be excluded
+ *  from that arbitrary slice, producing a false negative right when it matters most. The deliveryId match is
+ *  now pushed into the SQL predicate itself (json_extract on metadataJson, mirroring
+ *  countRecentDeadLettersByType's own json_extract usage below), so it's an exact match against every row in
+ *  the window regardless of how many other rows exist for this actor/event/target. */
+export async function hasAuditEventForDelivery(env: Env, actor: string, eventType: string, targetKey: string, deliveryId: string, sinceIso: string): Promise<boolean> {
+  const db = getDb(env.DB);
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.actor, actor),
+        eq(auditEvents.eventType, eventType),
+        eq(auditEvents.targetKey, targetKey),
+        gte(auditEvents.createdAt, sinceIso),
+        sql`json_extract(${auditEvents.metadataJson}, '$.deliveryId') = ${deliveryId}`,
+      ),
+    );
+  /* v8 ignore next -- count(*) always returns exactly one row; the empty-array guard only satisfies the destructure type. */
+  return (row?.count ?? 0) > 0;
+}
+
 /** Observability for the queue dead-letter rate (#1276): how many jobs (across BOTH the maintenance and webhook
  *  lanes) were dead-lettered since `sinceIso`. Reads the `github_app.dlq_dead_lettered` audit events written by
  *  processDlqBatch — NOT gated behind any review-ops flag, so the infra drop rate is always visible. */
@@ -3053,6 +3104,28 @@ export async function countOpenPullRequests(env: Env, fullName: string): Promise
   return Number(row?.count ?? 0);
 }
 
+/**
+ * Install-wide open-item count for one author (#2562, anti-abuse): SUM of this author's open PRs + open
+ * issues across EVERY repo tracked in this install's database -- deliberately NOT scoped by repoFullName,
+ * unlike countOpenPullRequests/countOpenIssues above. This is what makes the globalContributorOpenItemCap
+ * catch an actor spreading low-volume spam across several gated repos in the same self-hosted install: no
+ * single repo's own cap trips, but the aggregate does. Same-database aggregate only -- no cross-instance
+ * networking, mirroring the install-scoped singleton shape of global_contributor_blacklist. Case-insensitive
+ * login match (mirrors loginMatches/findBlacklistEntry elsewhere in this file).
+ */
+export async function countOpenItemsForAuthorAcrossRepos(env: Env, authorLogin: string): Promise<number> {
+  const db = getDb(env.DB);
+  const [[prRow], [issueRow]] = await Promise.all([
+    db.select({ count: sql<number>`count(*)` }).from(pullRequests).where(and(eq(pullRequests.state, "open"), loginMatches(pullRequests.authorLogin, authorLogin))),
+    db.select({ count: sql<number>`count(*)` }).from(issues).where(and(eq(issues.state, "open"), loginMatches(issues.authorLogin, authorLogin))),
+  ]);
+  /* v8 ignore next -- SQL aggregate count always returns one row; fallback protects D1 driver anomalies. */
+  const prCount = Number(prRow?.count ?? 0);
+  /* v8 ignore next -- SQL aggregate count always returns one row; fallback protects D1 driver anomalies. */
+  const issueCount = Number(issueRow?.count ?? 0);
+  return prCount + issueCount;
+}
+
 // Anti-farming (#anti-gaming-flood): how many PRs this author has SUBMITTED to this repo since `sinceIso` (ANY
 // state — open/merged/closed), so a flood that merges fast is still caught. createdAt is the row-insert time
 // (≈ when gittensory first saw the PR), a good proxy for submission time on live webhook-driven PRs.
@@ -3511,7 +3584,14 @@ export async function persistAdvisory(env: Env, advisory: Advisory): Promise<voi
 
 /** #1 self-host AI-review cache. Returns the cached AI review for this exact (repo, pull, head SHA) ONLY when the
  *  stored review mode matches — the LLM output changes only with the code (head SHA) or the review mode, so a re-run
- *  at the same SHA+mode reuses it instead of re-spending the call. A nullish head SHA (no commit to key on) is a miss. */
+ *  at the same SHA+mode reuses it instead of re-spending the call. A nullish head SHA (no commit to key on) is a miss.
+ *
+ *  #regate-churn: a stored row can be non-cacheable (`cacheable = 0` — a consensus defect / inconclusive / lock-
+ *  contention outcome that must never be trusted as a durable, indefinitely-reusable verdict). By default such a
+ *  row is a miss here, same as before this column existed. Pass `options.allowNonCacheable` (with a bounded
+ *  `options.maxAgeMs`) to ALSO accept a non-cacheable row when it is recent enough — this lets a scheduled re-gate
+ *  reuse the last known (even disputed) verdict for a bounded cooldown instead of re-spending an LLM call on every
+ *  sweep tick, while a stale non-cacheable row still correctly falls through to a fresh call. */
 export async function getCachedAiReview(
   env: Env,
   repoFullName: string,
@@ -3519,13 +3599,19 @@ export async function getCachedAiReview(
   headSha: string | null | undefined,
   mode: string,
   expectedInputFingerprint?: string | undefined,
+  options?: { allowNonCacheable?: boolean; maxAgeMs?: number } | undefined,
 ): Promise<{ notes: string; reviewerCount: number; findings: AdvisoryFinding[]; metadata?: Record<string, unknown> | undefined } | null> {
   if (!headSha) return null;
   const row = await env.DB
-    .prepare("SELECT notes, reviewer_count AS reviewerCount, ai_review_mode AS mode, findings_json AS findingsJson, metadata_json AS metadataJson FROM ai_review_cache WHERE repo_full_name = ? AND pull_number = ? AND head_sha = ?")
+    .prepare("SELECT notes, reviewer_count AS reviewerCount, ai_review_mode AS mode, findings_json AS findingsJson, metadata_json AS metadataJson, cacheable, created_at AS createdAt FROM ai_review_cache WHERE repo_full_name = ? AND pull_number = ? AND head_sha = ?")
     .bind(repoFullName, pullNumber, headSha)
-    .first<{ notes: string; reviewerCount: number; mode: string; findingsJson: string | null; metadataJson: string | null }>();
+    .first<{ notes: string; reviewerCount: number; mode: string; findingsJson: string | null; metadataJson: string | null; cacheable: number; createdAt: string }>();
   if (!row || row.mode !== mode) return null;
+  if (row.cacheable !== 1) {
+    if (!options?.allowNonCacheable) return null;
+    const ageMs = Date.now() - Date.parse(row.createdAt);
+    if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > (options.maxAgeMs ?? 0)) return null;
+  }
   const metadata = parseJson<Record<string, unknown>>(row.metadataJson, {});
   if (
     expectedInputFingerprint !== undefined &&
@@ -3540,25 +3626,29 @@ export async function getCachedAiReview(
   };
 }
 
-/** Upsert the AI review for (repo, pull, head SHA). A nullish head SHA is a no-op. */
+/** Upsert the AI review for (repo, pull, head SHA). A nullish head SHA is a no-op.
+ *  #regate-churn: `review.cacheable === false` still PERSISTS the attempt (so a repeated scheduled sweep pass at
+ *  the identical head+fingerprint can find it via getCachedAiReview's bounded allowNonCacheable lookup) but marks
+ *  it non-durable — omitted or any other value defaults to cacheable (1), the pre-existing behavior. */
 export async function putCachedAiReview(
   env: Env,
   repoFullName: string,
   pullNumber: number,
   headSha: string | null | undefined,
   mode: string,
-  review: { notes: string; reviewerCount: number; findings?: AdvisoryFinding[]; metadata?: Record<string, unknown> | undefined },
+  review: { notes: string; reviewerCount: number; findings?: AdvisoryFinding[]; metadata?: Record<string, unknown> | undefined; cacheable?: boolean | undefined },
 ): Promise<void> {
   if (!headSha) return;
   const createdAt = nowIso();
+  const cacheable = review.cacheable === false ? 0 : 1;
   await env.DB
     .prepare(
-      `INSERT INTO ai_review_cache (repo_full_name, pull_number, head_sha, ai_review_mode, notes, reviewer_count, findings_json, metadata_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO ai_review_cache (repo_full_name, pull_number, head_sha, ai_review_mode, notes, reviewer_count, findings_json, metadata_json, cacheable, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(repo_full_name, pull_number, head_sha) DO UPDATE SET
-         ai_review_mode = excluded.ai_review_mode, notes = excluded.notes, reviewer_count = excluded.reviewer_count, findings_json = excluded.findings_json, metadata_json = excluded.metadata_json, created_at = excluded.created_at`,
+         ai_review_mode = excluded.ai_review_mode, notes = excluded.notes, reviewer_count = excluded.reviewer_count, findings_json = excluded.findings_json, metadata_json = excluded.metadata_json, cacheable = excluded.cacheable, created_at = excluded.created_at`,
     )
-    .bind(repoFullName, pullNumber, headSha, mode, review.notes, review.reviewerCount, jsonString(review.findings ?? []), jsonString(review.metadata ?? {}), createdAt)
+    .bind(repoFullName, pullNumber, headSha, mode, review.notes, review.reviewerCount, jsonString(review.findings ?? []), jsonString(review.metadata ?? {}), cacheable, createdAt)
     .run();
 }
 
@@ -5790,12 +5880,21 @@ function normalizeReviewNagPolicy(value: string | null | undefined): "off" | "ho
   return value === "hold" || value === "close" ? value : "off";
 }
 
+function normalizeCommandRateLimitPolicy(value: string | null | undefined): "off" | "hold" {
+  return value === "hold" ? value : "off";
+}
+
 // A review-nag threshold/window is a discrete positive count, not a score — reuses the same non-clamping,
 // non-rounding shape as contributorOpenPrCap's normalizeOpenItemCap (#2270): an invalid value (fractional,
 // non-positive, non-finite) falls back to the given default rather than being silently coerced.
 function normalizePositiveIntWithDefault(value: number | null | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) return fallback;
   return value;
+}
+
+function normalizeReviewNagCooldownDays(value: number | null | undefined, fallback: number): number {
+  const normalized = normalizePositiveIntWithDefault(value, fallback);
+  return Math.min(normalized, MAX_REVIEW_NAG_COOLDOWN_DAYS);
 }
 
 function parseAutonomyPolicy(value: string): AutonomyPolicy {

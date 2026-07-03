@@ -28,14 +28,6 @@ export const docsNav: DocsGroup[] = [
     title: "Maintainers",
     subgroups: [
       {
-        title: "Hosted app",
-        items: [
-          { to: "/docs/maintainer-workflow", label: "Maintainer workflow" },
-          { to: "/docs/github-app", label: "GitHub App" },
-          { to: "/docs/maintainer-install-trust", label: "Maintainer install & trust" },
-        ],
-      },
-      {
         title: "Self-hosting: setup",
         items: [
           { to: "/docs/maintainer-self-hosting", label: "Overview" },
@@ -65,7 +57,16 @@ export const docsNav: DocsGroup[] = [
         title: "Self-hosting: release & security",
         items: [
           { to: "/docs/self-hosting-releases", label: "Releases & images" },
+          { to: "/docs/self-hosting-release-checklist", label: "Beta release checklist" },
           { to: "/docs/self-hosting-security", label: "Security" },
+        ],
+      },
+      {
+        title: "GitHub App & managed beta",
+        items: [
+          { to: "/docs/github-app", label: "GitHub App configuration" },
+          { to: "/docs/maintainer-workflow", label: "Maintainer workflow" },
+          { to: "/docs/maintainer-install-trust", label: "Maintainer install & trust" },
         ],
       },
     ],

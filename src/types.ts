@@ -33,6 +33,11 @@ export type JobMessage =
       repoFullName: string;
       prNumber: number;
       installationId: number;
+      // #regate-churn (req 8): an explicit manual re-gate request — bypasses the AI review cache and the
+      // bounded non-cacheable-reuse cooldown so it always pays for a fresh opinion. No current scheduled or
+      // webhook-driven caller sets this; it exists so a manual trigger has a supported way to force a fresh
+      // pass instead of reusing a recent (possibly disputed) result.
+      force?: boolean | undefined;
     }
   | {
       type: "refresh-registry";
@@ -470,6 +475,11 @@ export type PullRequestRecord = {
    *  stale-surface diagnostics, not as a hard re-review skip: GitHub comments/checks can still be stale or partial
    *  while this marker matches headSha. Publish-written; read straight from the row. */
   lastPublishedSurfaceSha?: string | null | undefined;
+  /** File paths changed by this open PR, when the caller has already resolved them (e.g. from the
+   *  `pull_request_files` cache). Absent/undefined when not resolved — callers must not assume an empty array
+   *  means "no files changed". Mirrors {@link RecentMergedPullRequestRecord.changedFiles} so the same
+   *  collision/preflight path-overlap scoring works for open PRs, not just merged history. */
+  changedFiles?: string[] | undefined;
 };
 
 export type IssueRecord = {
@@ -532,6 +542,13 @@ export type RepositorySettings = {
    *  >= 10 changed files OR >= 1000 changed (added+deleted) lines that would otherwise pass is HELD for manual review
    *  (neutral gate → "manual" verdict), never auto-merged and never a hard failure. Opt-in via `gate.size.mode`. */
   sizeGateMode?: GateRuleMode | undefined;
+  /** Lockfile-tamper-risk gate (#2563). `off` (default/absent) = no scan; `advisory`/`block` = a changed
+   *  `package-lock.json` whose diff changes a `resolved`/`integrity` value WITHOUT the same package's version
+   *  changing in a changed `package.json`, or whose `resolved` URL points outside `registry.npmjs.org`, produces
+   *  a `lockfile_tamper_risk` finding (`block` additionally hard-blocks). Distinct from the OSV.dev CVE analyzer
+   *  in review-enrichment — this is a tamper/integrity-substitution check, not a known-CVE check. Config-as-code
+   *  only — no DB column or dashboard toggle; set via `.gittensory.yml gate.lockfileIntegrity`. */
+  lockfileIntegrityGateMode?: GateRuleMode | undefined;
   /** Dry-run disposition (#gate-dryrun). When true, the gate renders the would-be merge/close/manual verdict (every
    *  advisory sub-gate promoted to block) WITHOUT enforcing — the posted check stays non-blocking. Lets advisory mode
    *  preview exactly what it would do before the maintainer flips to real enforcement. Default off. */
@@ -676,6 +693,28 @@ export type RepositorySettings = {
    *  configurable-with-fallback shape. Always populated by the DB layer (default `"new-account"`); optional so
    *  existing settings fixtures/callers need not be touched. */
   newAccountLabel?: string | undefined;
+  /** Per-command @gittensory rate limit (#2560, anti-abuse): generalizes the review-nag cooldown's counting
+   *  pattern (the audit-events ledger) to EVERY `@gittensory` command, keyed by `(actor, command, targetKey)` --
+   *  independent of, and complementary to, review-nag's own narrower thread-author-only scope. `"off"` (default)
+   *  is a no-op; `"hold"` posts a deterministic cooldown reply and skips the command's own dispatch. Always
+   *  populated by the DB layer (default `"off"`); optional so existing settings fixtures/callers need not be
+   *  touched. */
+  commandRateLimitPolicy?: "off" | "hold" | undefined;
+  /** Per-command rate limit (#2560): how many invocations of a single command an actor may make within
+   *  {@link commandRateLimitWindowHours} before the (N+1)th is throttled -- for a CHEAP command (cache-only,
+   *  no AI orchestrator call). Always populated by the DB layer (default `20`); optional so existing settings
+   *  fixtures/callers need not be touched. Only meaningful when {@link commandRateLimitPolicy} is not `"off"`. */
+  commandRateLimitMaxPerWindow?: number | undefined;
+  /** Per-command rate limit (#2560): the same threshold as {@link commandRateLimitMaxPerWindow}, but for an
+   *  AI-cost-bearing command (dispatches to a real orchestrator call: `ask`, `blockers`, `preflight`,
+   *  `reviewability`, `packet`, `duplicate-check`, `next-action`, `repo-fit`). Deliberately tighter than the
+   *  cheap-command default. Always populated by the DB layer (default `5`); optional so existing settings
+   *  fixtures/callers need not be touched. */
+  commandRateLimitAiMaxPerWindow?: number | undefined;
+  /** Per-command rate limit (#2560): the rolling window (in hours) both {@link commandRateLimitMaxPerWindow}
+   *  and {@link commandRateLimitAiMaxPerWindow} count against. Always populated by the DB layer (default `24`);
+   *  optional so existing settings fixtures/callers need not be touched. */
+  commandRateLimitWindowHours?: number | undefined;
   /** Agent-layer autonomy dial (#773): per-action-class level. Always populated by the DB layer (default
    *  `{}` = deny-by-default = "observe" for every class); optional so existing settings fixtures/callers
    *  need not be touched. The single source the action layer (#778) reads via `resolveAutonomy`. */

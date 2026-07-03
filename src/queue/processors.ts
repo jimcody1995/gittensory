@@ -1,11 +1,13 @@
 import {
   countOpenIssues,
+  countOpenItemsForAuthorAcrossRepos,
   countOpenPullRequests,
   getAgentCommandAnswer,
   getInstallation,
   getLatestRepoGithubTotalsSnapshot,
   getFreshOfficialMinerDetection,
   getPullRequest,
+  getPullRequestDetailSyncState,
   getRepoAuthorPullRequestHistory,
   getRepository,
   getDecryptedRepositoryAiKey,
@@ -50,6 +52,7 @@ import {
   recordAgentCommandFeedback,
   recordAuditEvent,
   countRecentAuditEventsForActorAndTarget,
+  hasAuditEventForDelivery,
   recordGateBlockOutcome,
   getGateBlockOutcome,
   isGlobalAgentFrozen,
@@ -93,6 +96,7 @@ import {
   fetchOpenPullRequestNumbersForCommit,
   fetchRequiredStatusContexts,
   invalidatePrStateCache,
+  isReviewsCacheUpToDate,
   primeDurablePrStateCache,
   refreshContributorActivity,
   refreshInstallationHealth,
@@ -136,6 +140,7 @@ import {
   buildMaintainerQueueDigest,
   buildPublicAgentCommandComment,
   type GittensoryMentionCommandName,
+  isAiCostBearingCommand,
   isAuthorizedCommandActor,
   isMaintainerQueueDigestCommand,
   parseAgentCommandFeedbackContext,
@@ -235,11 +240,13 @@ import { aiReviewCacheInputFingerprint } from "../review/ai-review-cache-input";
 import {
   downgradeCloseToHold,
   downgradeMergeToHold,
+  MAX_REVIEW_NAG_COOLDOWN_DAYS,
   isProtectedAutomationAuthor,
   planAgentMaintenanceActions,
   type PlannedAgentAction,
 } from "../settings/agent-actions";
 import { isAutoCloseExempt } from "../settings/auto-close-exempt";
+import { resolveGlobalContributorOpenItemCap } from "../settings/global-contributor-cap";
 import { detectMigrationCollisions, extractMigrationNumber, KNOWN_MIGRATION_DUPLICATES } from "../db/migration-collisions";
 import { listMigrationFilenamesAtRef } from "../github/migration-tree";
 import {
@@ -347,6 +354,7 @@ import {
 } from "../review/inline-comments";
 import { evaluatePreMergeChecks } from "../review/pre-merge-checks";
 import { secretLeakFinding } from "../review/safety";
+import { lockfileTamperRiskFinding } from "../review/lockfile-tamper";
 import {
   buildIssuePlanComment,
   classifyPlanCommandRequest,
@@ -425,6 +433,7 @@ import type {
   ContributorEvidenceRecord,
   ContributorRepoStatRecord,
   DetectedNotificationEvent,
+  GateRuleMode,
   GitHubWebhookPayload,
   IssueRecord,
   JobMessage,
@@ -862,6 +871,7 @@ export async function processJob(env: Env, message: JobMessage): Promise<void> {
         message.prNumber,
         message.installationId,
         message.deliveryId,
+        message.force,
       );
       return;
     case "run-agent":
@@ -1525,6 +1535,7 @@ async function regatePullRequest(
   prNumber: number,
   installationId: number,
   deliveryId: string,
+  force?: boolean,
 ): Promise<void> {
   // Reserve installation rate-limit headroom for real webhooks (#audit-rate-headroom): all repos share ONE GitHub
   // App installation = ONE REST bucket, so when the shared budget is at/below the maintenance floor, DEFER this
@@ -1542,6 +1553,7 @@ async function regatePullRequest(
         repoFullName,
         prNumber,
         installationId,
+        ...(force ? { force: true } : {}),
       },
       { delaySeconds: delayUntil(rateResetAt) },
     );
@@ -1557,9 +1569,11 @@ async function regatePullRequest(
     undefined,
     // Run the AI review on the sweep for BOTH advisory and block modes (#sweep-all-modes) — only skip when AI is
     // OFF. The #1462 per-(repo,pr,headSha,mode) cache bounds the cost: an unchanged PR re-gates from cache with no
-    // re-spend, so an advisory PR gets a posted review without burning a token every sweep tick.
+    // re-spend, so an advisory PR gets a posted review without burning a token every sweep tick. `force` (#regate-
+    // churn req 8) bypasses that cache/cooldown reuse entirely for an explicit manual re-gate request.
     {
       skipAiReview: settings.aiReviewMode === "off",
+      ...(force ? { force: true } : {}),
     },
   ).catch((error) => {
     /* v8 ignore next -- retryable/rate-limit propagation is exercised by queue retry tests; this catch only preserves that contract. */
@@ -2022,7 +2036,7 @@ async function runAgentMaintenancePlanAndExecute(
   // default) ⇒ this block is a no-op. A below-account-age-threshold author (#2561) gets a TIGHTER effective
   // cap (half, rounded up, minimum 1) — visibility/friction, still never a close on account age by itself
   // (the close, if any, is still tagged/reasoned as the ordinary contributor-cap close).
-  let contributorCapMatch: { matched: boolean; authorLogin: string; openCount: number; cap: number; itemKind: "pull requests" | "issues" } | undefined;
+  let contributorCapMatch: { matched: boolean; authorLogin: string; openCount: number; cap: number; itemKind: "pull requests" | "issues"; scope?: "repository" | "install" | undefined } | undefined;
   const contributorOpenPrCap =
     isNewAccount && typeof settings.contributorOpenPrCap === "number"
       ? Math.max(1, Math.ceil(settings.contributorOpenPrCap / 2))
@@ -2048,6 +2062,22 @@ async function runAgentMaintenancePlanAndExecute(
       .map((other) => other.number);
     if (otherOverCapSiblingNumbers.length > 0) {
       await wakeOverCapSiblingPullRequests(env, deliveryId, installationId, repoFullName, otherOverCapSiblingNumbers);
+    }
+  }
+
+  // Install-wide contributor open-item cap (#2562, anti-abuse): IN ADDITION TO the per-repo cap above, not
+  // instead of it -- only evaluated when the per-repo cap didn't already match (short-circuit: no need for a
+  // second cross-repo DB read once this PR is already being closed). Off by default (resolveGlobalContributorOpenItemCap
+  // returns null when GLOBAL_CONTRIBUTOR_OPEN_ITEM_CAP is unset/invalid) ⇒ zero extra queries, zero behavior
+  // change for an install that hasn't opted in. Reuses the shared autoCloseExemptLogins list (#2463) so a
+  // maintainer-named login is exempt here exactly like the per-repo caps and review-nag cooldown.
+  if (contributorCapMatch === undefined && pr.authorLogin && !isAutoCloseExempt(pr.authorLogin, settings.autoCloseExemptLogins)) {
+    const globalCap = resolveGlobalContributorOpenItemCap(env);
+    if (globalCap !== null) {
+      const installOpenCount = await countOpenItemsForAuthorAcrossRepos(env, pr.authorLogin);
+      if (installOpenCount > globalCap) {
+        contributorCapMatch = { matched: true, authorLogin: pr.authorLogin, openCount: installOpenCount, cap: globalCap, itemKind: "pull requests", scope: "install" };
+      }
     }
   }
 
@@ -2213,7 +2243,7 @@ async function reReviewStoredPullRequest(
   repoFullName: string,
   prNumber: number,
   previewPollAttempt?: number,
-  options: { skipAiReview?: boolean } = {},
+  options: { skipAiReview?: boolean; force?: boolean } = {},
 ): Promise<void> {
   const [repo, settings] = await Promise.all([
     getRepository(env, repoFullName),
@@ -2320,11 +2350,19 @@ async function reReviewStoredPullRequest(
     linkedIssueAuthorLogins,
   });
   await persistAdvisory(env, advisory);
-  if (
+  // #2537 follow-up (gate-flagged): the durable review cache's only invalidation path is markPullRequestReviewsInvalidated
+  // on a webhook (processors.ts). A "quiet" PR (no new pushes, slop evidence + manifest gate both off, no
+  // pre-merge check paths) never hits any of the three reasons below, so a DROPPED invalidation write could sit
+  // stale indefinitely even though this per-PR sweep unit visits every open PR on a bounded cadence.
+  // Short-circuit the extra read when another reason already forces the refresh.
+  const otherRefreshReasons =
     shouldCollectSlopEvidence(settings) ||
     settings.manifestPolicyGateMode !== "off" ||
-    (await shouldRefreshFilesForPreMergeChecks(env, repoFullName))
-  ) {
+    (await shouldRefreshFilesForPreMergeChecks(env, repoFullName));
+  const reviewsCacheStale =
+    !otherRefreshReasons &&
+    !isReviewsCacheUpToDate(await getPullRequestDetailSyncState(env, repoFullName, prNumber).catch(() => null));
+  if (otherRefreshReasons || reviewsCacheStale) {
     await refreshPullRequestDetails(env, repoFullName, prNumber).catch(
       () => undefined,
     );
@@ -2352,6 +2390,8 @@ async function reReviewStoredPullRequest(
           liveFacts,
           ...(previewPollAttempt !== undefined ? { previewPollAttempt } : {}),
           ...(options.skipAiReview ? { skipAiReview: true } : {}),
+          ...(options.force ? { forceAiReview: true } : {}),
+          hasPendingRefreshSignal: otherRefreshReasons || reviewsCacheStale,
         },
       ),
   ).catch((error) => {
@@ -2940,6 +2980,21 @@ async function claimTransientLock(
 // LLM call for the identical head+mode), not a GitHub-mutating actuation, so it has different scoping (keyed by
 // head SHA + mode, not just PR) and a much longer TTL (an LLM call legitimately runs far longer than a close).
 const AI_REVIEW_LOCK_TTL_SECONDS = 1_800; // 30 minutes — see justification below.
+
+// #regate-churn: how long a non-durably-cacheable AI review outcome may be reused by a scheduled re-gate at the
+// IDENTICAL head+fingerprint+mode before a fresh LLM call is paid for again. Covers TWO distinct non-cacheable
+// sources, both of which used to have NO retry bound at all: (1) a genuine non-cacheable verdict (consensus
+// defect / inconclusive / lock-contention placeholder) that the durable cache (see #1 above) correctly never
+// stores as a reusable result, and (2) a dynamic-context repo (grounding/RAG/enrichment/reputation), which
+// previously bypassed the cache unconditionally on every single call. Root-caused in production: a single PR
+// with RAG enabled generated 259 of 281 AI review calls in 24h via (2) at an UNCHANGED head, plus another 24 via
+// (1) — 281 calls total, ~1 every 5 minutes, forever, with nothing ever throttling the retry. This bounds that
+// retry cadence without ever treating either outcome as a durable, indefinitely-trustworthy result — it still
+// expires and retries periodically (the LLM's own non-determinism may resolve a dispute; dynamic external
+// context may genuinely have drifted), and any REAL state change (a new head, a changed review-input
+// fingerprint) bypasses this bound immediately regardless of age. Matches AI_REVIEW_LOCK_TTL_SECONDS's
+// 30-minute order of magnitude — same "crash/dispute backstop, not a throughput bound" philosophy.
+const AI_REVIEW_NON_CACHEABLE_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 
 function aiReviewLockKey(repoFullName: string, prNumber: number, headSha: string, mode: string): string {
   return `ai-review-lock:${repoFullName.toLowerCase()}#${prNumber}@${headSha.toLowerCase()}:${mode}`;
@@ -3911,13 +3966,49 @@ async function maybeCloseIssueOverContributorCap(
   const { installationId, repoFullName, issue, settings } = args;
   const cap = settings.contributorOpenIssueCap;
   const authorLogin = issue.authorLogin;
-  if (typeof cap !== "number" || !authorLogin) return;
+  // Install-wide cap (#2562) is checked IN ADDITION TO the per-repo cap, so this function must still run when
+  // ONLY the global cap is configured (the per-repo cap stays optional/off, its usual default).
+  const globalCap = resolveGlobalContributorOpenItemCap(env);
+  if ((typeof cap !== "number" && globalCap === null) || !authorLogin) return;
 
   const repoOwner = repoFullName.includes("/") ? repoFullName.slice(0, repoFullName.indexOf("/")) : "";
   const authorIsOwner = authorLogin.toLowerCase() === repoOwner.toLowerCase();
   const authorIsAdmin = parseGitHubLoginList(env.ADMIN_GITHUB_LOGINS).has(authorLogin.toLowerCase());
   const authorIsAutomationBot = isProtectedAutomationAuthor(authorLogin);
   if (authorIsOwner || authorIsAdmin || authorIsAutomationBot) return;
+
+  // Install-wide check first (#2562): reuses the shared autoCloseExemptLogins list, same as the PR path. A
+  // match here closes THIS issue directly (unlike the per-repo cap below, there is no cross-repo sibling set to
+  // union/live-verify -- the aggregate count already covers every repo, so a single over-cap read is enough).
+  if (globalCap !== null && !isAutoCloseExempt(authorLogin, settings.autoCloseExemptLogins)) {
+    const installOpenCount = await countOpenItemsForAuthorAcrossRepos(env, authorLogin);
+    if (installOpenCount > globalCap) {
+      const planned = planAgentMaintenanceActions({
+        conclusion: "skipped",
+        blockerTitles: [],
+        autonomy: settings.autonomy,
+        changedPaths: [],
+        hardGuardrailGlobs: [],
+        authorIsOwner,
+        authorIsAdmin,
+        authorIsAutomationBot,
+        ciState: "unverified",
+        contributorCapMatch: { matched: true, authorLogin, openCount: installOpenCount, cap: globalCap, itemKind: "issues", scope: "install" },
+        contributorCapLabel: settings.contributorCapLabel,
+        pr: { labels: [] },
+      });
+      if (planned.length > 0) {
+        await executeIssueMaintenanceActions(
+          env,
+          { installationId, repoFullName, issueNumber: issue.number, autonomy: settings.autonomy, agentPaused: settings.agentPaused, agentDryRun: settings.agentDryRun },
+          planned,
+        );
+      }
+      return;
+    }
+  }
+
+  if (typeof cap !== "number") return;
 
   const otherOpenIssues = await listOpenIssues(env, repoFullName);
   const authorLoginLower = authorLogin.toLowerCase();
@@ -4882,6 +4973,7 @@ export function gateCheckPolicy(
     // thresholds default to 10 files / 1000 lines (advisory.ts constants); the live counts + guardrail-hit come from
     // the per-PR sizeContext threaded by the caller.
     sizeGateMode: settings.sizeGateMode,
+    lockfileIntegrityGateMode: settings.lockfileIntegrityGateMode,
     changedFileCount: sizeContext?.changedFileCount ?? null,
     changedLineCount: sizeContext?.changedLineCount ?? null,
     guardrailHit: sizeContext?.guardrailHit ?? false,
@@ -5111,6 +5203,10 @@ export async function runAiReviewForAdvisory(
     // manifest. Threaded in (not loaded here) so the AI review path makes no extra manifest fetch — absent ⇒
     // null ⇒ balanced ⇒ the reviewer prompt is byte-identical.
     reviewProfile?: ReviewProfile | null | undefined;
+    // `.gittensory.yml` review.security_focus (#review-security-focus), resolved by the caller from the
+    // (already-cached) manifest. Orthogonal to reviewProfile — composes with it rather than replacing it.
+    // Absent/false ⇒ the reviewer prompt is byte-identical.
+    reviewSecurityFocus?: boolean | undefined;
     // `.gittensory.yml` review.path_instructions (#review-path-instructions), resolved by the caller from the
     // cached manifest. The CONFIG (not a fetch) is threaded in; the per-PR glob match against `files` happens
     // here (pure), so the AI path makes no extra manifest fetch. Absent/empty ⇒ byte-identical reviewer prompt.
@@ -5136,6 +5232,13 @@ export async function runAiReviewForAdvisory(
       findings: AdvisoryFinding[];
       metadata?: Record<string, unknown> | undefined;
       cacheable?: boolean | undefined;
+      // #regate-churn: distinct from `cacheable` — false ONLY for the lock-contention placeholder below (another
+      // pass is concurrently reviewing this exact head RIGHT NOW). That placeholder describes a transient
+      // scheduling race, not a real AI opinion, and the concurrent pass it deferred to will itself persist the
+      // real result within seconds — so it must never be written at all (not even non-durably), or a later read
+      // within the bounded cooldown could replay "another pass is running" long after that pass finished.
+      // Defaults to true (persistable) for every other outcome, cacheable or not.
+      persistable?: boolean | undefined;
     }
   | undefined
 > {
@@ -5228,6 +5331,7 @@ export async function runAiReviewForAdvisory(
       inlineFindings: [],
       findings,
       cacheable: false,
+      persistable: false,
     };
   }
   try {
@@ -5346,6 +5450,7 @@ export async function runAiReviewForAdvisory(
       observability: { rag: ragTelemetry },
       enrichment,
       profile: args.reviewProfile ?? null,
+      securityFocus: args.reviewSecurityFocus === true,
       // Inline comments (#inline-comments): ask the model for line-anchored findings only when the operator flag,
       // the cutover allowlist, AND the per-repo manifest toggle all pass. Otherwise the prompt is byte-identical.
       inlineFindings: shouldRequestInlineFindings(
@@ -5575,6 +5680,46 @@ export async function maybeAddSecretLeakFinding(
 }
 
 /**
+ * Lockfile-tamper-risk scan (#2563, opt-in via `lockfileIntegrityGateMode`). Scans a changed
+ * `package-lock.json`'s diff for a `resolved`/`integrity` value that changed without the corresponding
+ * `package.json` dependency version changing, or a `resolved` URL outside `registry.npmjs.org`, and on a hit
+ * appends ONE warning-severity `lockfile_tamper_risk` finding to the advisory BEFORE evaluateGateCheck runs —
+ * the gate treats that code as a blocker only when the repo has set `lockfileIntegrityGateMode: block`
+ * (rules/advisory.ts). Mode `off` (the default) skips the scan entirely so the advisory/gate stays
+ * byte-identical to today. Fail-safe: a file-load error is swallowed so it can never destabilize the gate.
+ */
+export async function maybeAddLockfileTamperFinding(
+  env: Env,
+  args: {
+    advisory: Awaited<ReturnType<typeof buildPullRequestAdvisory>>;
+    repoFullName: string;
+    pullNumber: number;
+    lockfileIntegrityGateMode: GateRuleMode | undefined;
+    files: Awaited<ReturnType<typeof listPullRequestFiles>> | null;
+  },
+): Promise<void> {
+  if (!args.lockfileIntegrityGateMode || args.lockfileIntegrityGateMode === "off") return;
+  try {
+    const files =
+      args.files ??
+      (await listPullRequestFiles(env, args.repoFullName, args.pullNumber));
+    const finding = lockfileTamperRiskFinding(files);
+    if (finding) args.advisory.findings.push(finding);
+  } catch (error) {
+    /* v8 ignore next -- fail-safe: a file-load error never destabilizes the gate. */
+    console.error(
+      JSON.stringify({
+        level: "error",
+        event: "lockfile_tamper_scan_failed",
+        repository: args.repoFullName,
+        pullNumber: args.pullNumber,
+        error: errorMessage(error),
+      }),
+    );
+  }
+}
+
+/**
  * AI-assisted slop advisory (opt-in `slopAiAdvisory`). Appends at most one ADVISORY-only `ai_slop_advisory`
  * finding to the advisory; NEVER touches slopRisk or the gate (only the deterministic core can block). The
  * caller gates on `settings.slopAiAdvisory` and reuses the already-fetched changed files. Like the AI review
@@ -5795,6 +5940,33 @@ export function reputationOutcomeFromTerminalState(
   return undefined;
 }
 
+/**
+ * Open-PR file-path collision (#2653): enrich `changedFiles` on the reviewed PR and its open siblings from the
+ * `pull_request_files` cache, so `buildCollisionReport`'s existing termOverlap heuristic (which already tokenizes
+ * `changedFiles` for merged PRs, see recentMergedItem) gets real path signal for open-vs-open pairs too — not
+ * just title/label/linked-issue text. A single bounded D1 read (no GitHub API calls): siblings are populated by
+ * the routine detail-sync backfill independent of this flag, so this is a cache read, not a live fetch. Only
+ * `PullRequestRecord`s already carrying no `changedFiles` are overwritten; entries missing from the cache (e.g. a
+ * brand-new PR reviewed before its first detail-sync) are left as-is and simply carry no path signal this pass —
+ * a fail-safe degrade, not an error, and the next scheduled re-gate sweep picks it up once synced.
+ */
+export async function enrichOpenPullRequestsWithChangedFiles(env: Env, repoFullName: string, pullRequests: PullRequestRecord[]): Promise<PullRequestRecord[]> {
+  const openPullNumbers = pullRequests.filter((candidate) => candidate.state === "open").map((candidate) => candidate.number);
+  if (openPullNumbers.length === 0) return pullRequests;
+  const filePaths = await listRepoPullRequestFilePaths(env, repoFullName, { pullNumbers: openPullNumbers });
+  if (filePaths.length === 0) return pullRequests;
+  const pathsByPullNumber = new Map<number, string[]>();
+  for (const row of filePaths) {
+    const paths = pathsByPullNumber.get(row.pullNumber) ?? [];
+    paths.push(row.path);
+    pathsByPullNumber.set(row.pullNumber, paths);
+  }
+  return pullRequests.map((candidate) => {
+    const paths = pathsByPullNumber.get(candidate.number);
+    return paths ? { ...candidate, changedFiles: paths } : candidate;
+  });
+}
+
 async function maybePublishPrPublicSurface(
   env: Env,
   installationId: number,
@@ -5810,6 +5982,18 @@ async function maybePublishPrPublicSurface(
     baseSha?: string | null | undefined;
     previewPollAttempt?: number | undefined;
     skipAiReview?: boolean | undefined;
+    // #regate-churn (req 8): an explicit manual re-gate can force a fresh AI opinion, bypassing BOTH the durable
+    // cache and the bounded non-cacheable-reuse cooldown. Threaded from regatePullRequest's own `force` param
+    // (see the "agent-regate-pr" job's optional `force` field) — no production scheduler or webhook enqueues a
+    // job with `force` set today, so this is a supported hook for a future manual-trigger producer, not yet
+    // reachable from any automatic path.
+    forceAiReview?: boolean | undefined;
+    // #regate-churn (req 6/7): true when the caller ALREADY determined something besides the AI review itself
+    // may need a fresh look this pass (slop evidence collection, the manifest gate, a pre-merge-check refresh, or
+    // a stale reviews-data cache — see reReviewStoredPullRequest's otherRefreshReasons/reviewsCacheStale). The
+    // public-surface no-op guard below only fires when this is false — any of those signals means something
+    // besides the head SHA could make the published output differ from what is already live.
+    hasPendingRefreshSignal?: boolean | undefined;
     liveFacts: LiveGithubFacts;
   },
 ): Promise<ReturnType<typeof evaluateGateCheck> | undefined> {
@@ -6004,10 +6188,12 @@ async function maybePublishPrPublicSurface(
         findings?: AdvisoryFinding[];
         metadata?: Record<string, unknown> | undefined;
         cacheable?: boolean | undefined;
+        persistable?: boolean | undefined;
       }
     | undefined;
   let inlineCommentsEnabledForReview = false;
   let aiReviewExpected = false;
+  let aiReviewWasReused = false;
   let gateFinalized = false;
   const publishedOutputs: PublicSurfaceOutput[] = [];
   const failedOutputs: PublicSurfaceOutputFailure[] = [];
@@ -6180,15 +6366,22 @@ async function maybePublishPrPublicSurface(
       listPullRequests(env, repoFullName),
       listBountiesByRepo(env, repoFullName),
     ]);
+    // Open-PR file-path collision (#2653): flag-gated, byte-identical when OFF (see enrichOpenPullRequestsWithChangedFiles).
+    // Scoped to collision/preflight/queue-health inputs only — every OTHER use of repoPullRequests below (e.g. the
+    // duplicate-winner adjudication, which is same-linked-issue-based, not path-based) keeps reading the un-enriched array.
+    const collisionPullRequests =
+      env.GITTENSORY_OPEN_PR_FILE_COLLISION === "true"
+        ? await enrichOpenPullRequestsWithChangedFiles(env, repoFullName, repoPullRequests)
+        : repoPullRequests;
     collisions = buildCollisionReport(
       repoFullName,
       repoIssues,
-      repoPullRequests,
+      collisionPullRequests,
     );
     queueHealth = buildQueueHealth(
       repo,
       repoIssues,
-      repoPullRequests,
+      collisionPullRequests,
       collisions,
     );
     preflight = buildPreflightResult(
@@ -6203,7 +6396,7 @@ async function maybePublishPrPublicSurface(
       },
       repo,
       repoIssues,
-      repoPullRequests,
+      collisionPullRequests,
       repoBounties,
     );
     // Duplicate-winner adjudication (#dup-winner): compute the winner ONCE for this review run from the SAME
@@ -6431,13 +6624,16 @@ async function maybePublishPrPublicSurface(
         },
         async () => {
           const reviewManifest = await loadRepoFocusManifest(env, repoFullName).catch(() => null);
-          // `.gittensory.yml` review.profile + review.path_instructions + review.exclude_paths (#review-profile /
-          // #review-path-instructions / #review-exclude-paths): resolve from the manifest (cached from settings
-          // resolution, so a cheap cache hit — no extra fetch) and thread them into the AI review. Profile shapes
-          // nitpickiness; path-instructions add per-path guidance; exclude-paths drop files from review. Absent ⇒
-          // byte-identical prompt. Fail-safe to defaults on any read error (resolveReviewPromptOverrides).
+          // `.gittensory.yml` review.profile + review.security_focus + review.path_instructions +
+          // review.exclude_paths (#review-profile / #review-security-focus / #review-path-instructions /
+          // #review-exclude-paths): resolve from the manifest (cached from settings resolution, so a cheap cache
+          // hit — no extra fetch) and thread them into the AI review. Profile shapes nitpickiness; security-focus
+          // adds elevated scrutiny for a security-defect category (orthogonal to profile); path-instructions add
+          // per-path guidance; exclude-paths drop files from review. Absent ⇒ byte-identical prompt. Fail-safe to
+          // defaults on any read error (resolveReviewPromptOverrides).
           const {
             profile: reviewProfile,
+            securityFocus: reviewSecurityFocus,
             inlineComments: reviewInlineComments,
             pathInstructions: reviewPathInstructions,
             instructions: manifestReviewInstructions,
@@ -6518,6 +6714,7 @@ async function maybePublishPrPublicSurface(
                 }
               : null,
             profile: reviewProfile,
+            securityFocus: reviewSecurityFocus,
             inlineComments: inlineCommentsEnabledForReview,
             pathInstructions: reviewPathInstructions,
             pathGuidance: resolveReviewPathInstructions(
@@ -6541,10 +6738,24 @@ async function maybePublishPrPublicSurface(
           // mode, reviewer plan, feature activation, or prompt-shaping inputs change. A re-delivered webhook or the
           // block-mode re-gate sweep can reuse that exact review; stale same-head reviews from older private review
           // instructions or feature config are intentionally treated as misses. The deterministic gate still runs.
-          // A repo with an active dynamic-context feature (grounding/RAG/enrichment/reputation) bypasses the
-          // cache entirely — see dynamicReviewContextActive above — since a cache hit there could replay a
-          // review built against now-stale external context for an otherwise-unchanged head.
-          const cachedReview = dynamicReviewContextActive
+          // `webhook.forceAiReview` (a manual re-gate, if the caller opts in) bypasses the cache entirely: the
+          // caller is explicitly asking for a fresh opinion, not a replayed one.
+          //
+          // #regate-churn (root cause, confirmed in production): a repo with an active dynamic-context feature
+          // (grounding/RAG/enrichment/reputation) used to bypass the cache UNCONDITIONALLY on every single call,
+          // on the theory that TIME-VARYING external context (the vector index, REES/CVE data, evolving
+          // reputation) can drift for the SAME head SHA without any of these booleans flipping, and fingerprinting
+          // only "is the feature on" can't detect that drift without fetching the content itself. That reasoning
+          // is right for a genuinely time-sensitive re-check, but a live incident showed it also means a
+          // dynamic-context repo re-spends an LLM call on EVERY scheduled sweep tick forever, with no bound at
+          // all: one PR with RAG enabled generated 259 of 281 AI review calls in 24h this way, at an UNCHANGED
+          // head. A dynamic-context result is therefore now always written non-durably (cacheable=false, same as
+          // a consensus-defect/inconclusive outcome below) rather than not written at all, so it can ALSO be
+          // reused for a bounded cooldown (AI_REVIEW_NON_CACHEABLE_RETRY_COOLDOWN_MS) — long enough to collapse a
+          // sweep tick's worth of redundant calls into one, short enough that genuinely drifted external context
+          // is still picked up well within the hour. A genuinely cacheable, non-dynamic-context row is unaffected
+          // (unbounded reuse, exactly as before this fix).
+          const cachedReview = webhook.forceAiReview === true
             ? null
             : await getCachedAiReview(
                 env,
@@ -6553,11 +6764,56 @@ async function maybePublishPrPublicSurface(
                 advisory.headSha,
                 settings.aiReviewMode,
                 inputFingerprint,
+                { allowNonCacheable: true, maxAgeMs: AI_REVIEW_NON_CACHEABLE_RETRY_COOLDOWN_MS },
               ).catch(() => null);
           if (cachedReview && hasPublicReviewAssessment(cachedReview.notes)) {
             advisory.findings.push(...cachedReview.findings);
             aiReview = cachedReview;
+            aiReviewWasReused = true;
+            incr("gittensory_ai_review_cache_hit_total");
+            await recordAuditEvent(env, {
+              eventType: "github_app.ai_review_cache_hit",
+              actor: author,
+              targetKey: `${repoFullName}#${pr.number}`,
+              outcome: "completed",
+              detail: "reused a stored AI review instead of re-spending an LLM call",
+              metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+            }).catch(() => undefined);
+            await recordAuditEvent(env, {
+              eventType: "agent.sweep.regate_ai_skipped_current",
+              actor: author,
+              targetKey: `${repoFullName}#${pr.number}`,
+              outcome: "completed",
+              detail: "AI review already current for this head+fingerprint; skipped re-review",
+              metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+            }).catch(() => undefined);
+            incr("gittensory_regate_ai_skipped_current_total");
           } else {
+            // A forced bypass is NOT a cache miss — the cache may well have had a valid, reusable entry; the
+            // caller explicitly asked to skip it. Counting it under the miss metric would make "the cache failed
+            // to serve" indistinguishable from "a caller deliberately opted out," which muddies exactly the
+            // incident-dashboard signal this whole fix exists to provide.
+            if (webhook.forceAiReview === true) {
+              incr("gittensory_ai_review_force_bypass_total");
+              await recordAuditEvent(env, {
+                eventType: "github_app.ai_review_force_bypass",
+                actor: author,
+                targetKey: `${repoFullName}#${pr.number}`,
+                outcome: "completed",
+                detail: "explicit force re-gate bypassed the AI review cache and cooldown",
+                metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+              }).catch(() => undefined);
+            } else {
+              incr("gittensory_ai_review_cache_miss_total");
+              await recordAuditEvent(env, {
+                eventType: "github_app.ai_review_cache_miss",
+                actor: author,
+                targetKey: `${repoFullName}#${pr.number}`,
+                outcome: "completed",
+                detail: "no reusable stored AI review for this head+fingerprint; running a fresh review",
+                metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+              }).catch(() => undefined);
+            }
             aiReview = await runAiReviewForAdvisory(env, {
               settings,
               advisory,
@@ -6568,12 +6824,32 @@ async function maybePublishPrPublicSurface(
               confirmedContributor,
               files: reviewFilesForAi,
               reviewProfile,
+              reviewSecurityFocus,
               reviewPathInstructions,
               reviewInstructions,
               reviewExcludePaths,
               reviewInlineComments,
             });
-            if (aiReview && aiReview.cacheable !== false && !dynamicReviewContextActive)
+            // `persistable === false` (only the lock-contention placeholder — see runAiReviewForAdvisory's return
+            // type doc comment) is excluded from EVERY write, not just the durable one: it describes a transient
+            // scheduling race, not a real AI opinion, and the concurrent pass it deferred to persists the real
+            // result within seconds — writing this placeholder (even non-durably) could replay a stale "another
+            // pass is running" message for the rest of the cooldown window, well after that race resolved.
+            if (aiReview && aiReview.persistable !== false) {
+              // A dynamic-context result is never durably cacheable (see the comment above); otherwise defer to
+              // the review's own verdict (consensus defect / inconclusive → false).
+              const cacheableForStorage = !dynamicReviewContextActive && aiReview.cacheable !== false;
+              if (!cacheableForStorage) {
+                incr("gittensory_ai_review_non_cacheable_total");
+                await recordAuditEvent(env, {
+                  eventType: "github_app.ai_review_non_cacheable",
+                  actor: author,
+                  targetKey: `${repoFullName}#${pr.number}`,
+                  outcome: "completed",
+                  detail: "AI review outcome is not durably cacheable; persisted for bounded-cooldown reuse only",
+                  metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+                }).catch(() => undefined);
+              }
               await putCachedAiReview(
                 env,
                 repoFullName,
@@ -6582,13 +6858,27 @@ async function maybePublishPrPublicSurface(
                 settings.aiReviewMode,
                 {
                   ...aiReview,
+                  cacheable: cacheableForStorage,
                   metadata: {
                     /* v8 ignore next -- runAiReviewForAdvisory (the sole path reaching here) always sets metadata on its "ok" returns; the nullish fallback is a type-level (optional field) safeguard, not a reachable runtime path. */
                     ...(aiReview.metadata ?? {}),
                     inputFingerprint,
                   },
                 },
-              ).catch(() => undefined);
+              ).catch((error) => {
+                // #regate-churn (req 3/9): a swallowed write failure here is exactly how the cache goes silently
+                // stale in production — make it observable instead of a bare no-op catch.
+                incr("gittensory_ai_review_cache_write_error_total");
+                return recordAuditEvent(env, {
+                  eventType: "github_app.ai_review_cache_write_error",
+                  actor: author,
+                  targetKey: `${repoFullName}#${pr.number}`,
+                  outcome: "error",
+                  detail: errorMessage(error),
+                  metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+                }).catch(() => undefined);
+              });
+            }
           }
         },
       );
@@ -6627,6 +6917,16 @@ async function maybePublishPrPublicSurface(
       advisory,
       repoFullName,
       pullNumber: pr.number,
+      files: await getReviewFiles(),
+    });
+
+    // Lockfile-tamper-risk scan (#2563): opt-in via `lockfileIntegrityGateMode` (default off — the scan is
+    // skipped entirely). getReviewFiles() is memoized, so this reuses the already-loaded diff when present.
+    await maybeAddLockfileTamperFinding(env, {
+      advisory,
+      repoFullName,
+      pullNumber: pr.number,
+      lockfileIntegrityGateMode: settings.lockfileIntegrityGateMode,
       files: await getReviewFiles(),
     });
 
@@ -6758,6 +7058,44 @@ async function maybePublishPrPublicSurface(
         conclusion: gateEvaluation.conclusion,
         reasonCode,
       });
+    }
+    // #regate-churn (req 6/7): a public-surface no-op guard, deliberately narrow. markPullRequestSurfacePublished's
+    // own doc comment warns lastPublishedSurfaceSha is "reporting/diagnostic state, not a hard scheduled-sweep
+    // skip" because a comment can be stale or partial even when the head marker matches — so this ONLY applies to
+    // a check-run-only repo (publicSurface "off": no comment, no label ever published, nothing else that marker
+    // can't prove current) with an independently-verified COMPLETED check run at the exact current head, no
+    // pending refresh signal (slop evidence / manifest gate / pre-merge-check / reviews-cache staleness — see
+    // hasPendingRefreshSignal), and an AI review dimension that is either not in play or was itself reused rather
+    // than freshly computed. Any doubt on any of these falls through to the full, unconditional publish below —
+    // this guard is only ever allowed to skip a PROVABLE no-op, never to guess one.
+    if (
+      gateEnabled &&
+      settings.publicSurface === "off" &&
+      !webhook.hasPendingRefreshSignal &&
+      !webhook.forceAiReview &&
+      (!aiReviewWillRun || aiReviewWasReused) &&
+      advisory.headSha &&
+      advisory.headSha === pr.lastPublishedSurfaceSha
+    ) {
+      const existingChecks = await listCheckSummaries(env, repoFullName, pr.number).catch(() => []);
+      const currentGateCheck = existingChecks.find(
+        (check) =>
+          check.name === GITTENSORY_GATE_CHECK_NAME &&
+          check.headSha === advisory.headSha &&
+          check.status === "completed",
+      );
+      if (currentGateCheck) {
+        incr("gittensory_public_surface_publish_skipped_current_total");
+        await recordAuditEvent(env, {
+          eventType: "github_app.public_surface_publish_skipped_current",
+          actor: author,
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "completed",
+          detail: "public surface already current for this head; skipped republish",
+          metadata: { deliveryId: webhook.deliveryId, repoFullName, /* v8 ignore next -- reached only inside aiReviewWillRun (which requires a truthy advisory.headSha) or the publish-skip guard's own `advisory.headSha &&` check; the `?? null` is a type-level fallback for an unreachable branch. */ headSha: advisory.headSha ?? null },
+        }).catch(() => undefined);
+        return gateEvaluation;
+      }
     }
     const finalFreshness = await freshnessForReviewOutput("final_publish");
     if (await skipStaleReviewOutput(finalFreshness)) {
@@ -8814,7 +9152,7 @@ async function maybeThrottleReviewNagPing(
   /* v8 ignore next -- resolveRepositorySettings always resolves a concrete positive integer (NOT NULL DEFAULT 3); the undefined side is defensive against the field's optional TS type. */
   const maxPings = settings.reviewNagMaxPings ?? 3;
   /* v8 ignore next -- resolveRepositorySettings always resolves a concrete positive integer (NOT NULL DEFAULT 5); the undefined side is defensive against the field's optional TS type. */
-  const cooldownDays = settings.reviewNagCooldownDays ?? 5;
+  const cooldownDays = Math.min(settings.reviewNagCooldownDays ?? 5, MAX_REVIEW_NAG_COOLDOWN_DAYS);
   const sinceIso = new Date(Date.now() - cooldownDays * 24 * 60 * 60 * 1000).toISOString();
   const priorPings = await countRecentAuditEventsForActorAndTarget(env, commenter, REVIEW_NAG_PING_EVENT_TYPE, targetKey, sinceIso);
   const pingCount = priorPings + 1; // this ping counts too
@@ -8922,6 +9260,119 @@ async function maybeThrottleReviewNagPing(
       authorLogin: pr.authorLogin,
     },
     planned,
+  );
+  return true;
+}
+
+// Audit eventType for one recorded @gittensory command invocation (#2560). Shared between the recorder below
+// and the cooldown-window count query so a naming drift can't silently under/over-count.
+const COMMAND_RATE_LIMIT_EVENT_TYPE = "github_app.command_invocation";
+// How far back to look for a redelivered webhook's OWN prior invocation record. Deliberately much shorter
+// than the rate-limit window itself (hours) -- a genuine GitHub redelivery lands within seconds/minutes.
+const COMMAND_RATE_LIMIT_REDELIVERY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Per-command @gittensory rate limit (#2560, anti-abuse): generalizes review-nag's audit-ledger counting
+ * pattern (`countRecentAuditEventsForActorAndTarget`) to EVERY `@gittensory` Q&A command, not just
+ * review-request pings. Keyed by `(actor, command, targetKey)` — the command name is folded into targetKey so
+ * repeatedly invoking ONE command never counts against a DIFFERENT command's own limit. Independent of, and
+ * complementary to, `maybeThrottleReviewNagPing` above: that one stays scoped to the thread's OWN author and
+ * can close a PR; this covers ANY authorized actor invoking ANY command and only ever holds (declines with a
+ * notice), never closes. Off (`commandRateLimitPolicy: "off"`, the default) is a complete no-op.
+ */
+async function maybeThrottleGittensoryCommand(
+  env: Env,
+  args: {
+    deliveryId: string;
+    repoFullName: string;
+    issueNumber: number;
+    installationId: number;
+    commenter: string;
+    command: GittensoryMentionCommandName;
+    settings: RepositorySettings;
+    mode: ReturnType<typeof resolveAgentActionMode>;
+  },
+): Promise<boolean> {
+  /* v8 ignore next -- resolveRepositorySettings always resolves a concrete "off"/"hold"; the undefined side is defensive against the field's optional TS type. */
+  const policy = args.settings.commandRateLimitPolicy ?? "off";
+  if (policy === "off") return false;
+
+  const targetKey = `${args.repoFullName}#${args.issueNumber}#${args.command}`;
+
+  // Webhook redelivery guard: GitHub can and does redeliver the same issue_comment event (timeout/retry) --
+  // without this, a redelivered event would increment the counter a SECOND time for one real invocation and
+  // could incorrectly rate-limit it. Scoped to a short recent window (not the full rate-limit window) — a
+  // genuine redelivery lands within seconds/minutes, not hours later.
+  const redeliverySinceIso = new Date(Date.now() - COMMAND_RATE_LIMIT_REDELIVERY_WINDOW_MS).toISOString();
+  const alreadySeen = await hasAuditEventForDelivery(env, args.commenter, COMMAND_RATE_LIMIT_EVENT_TYPE, targetKey, args.deliveryId, redeliverySinceIso);
+  // Gate review finding: returning `false` here let a redelivered webhook fall through to normal dispatch — a
+  // SECOND run of the (possibly cost-bearing) command for one real invocation, uncounted and unheld. The
+  // original delivery already ran the command and posted its own answer, so short-circuit the replay entirely
+  // (no dispatch, no comment) rather than treating it as an under-threshold pass-through.
+  if (alreadySeen) {
+    await recordAuditEvent(env, {
+      eventType: "github_app.command_redelivery_suppressed",
+      actor: args.commenter,
+      targetKey,
+      outcome: "completed",
+      detail: `redelivered ${args.command} invocation suppressed (deliveryId ${args.deliveryId})`,
+      metadata: { deliveryId: args.deliveryId, repoFullName: args.repoFullName, command: args.command },
+    }).catch(
+      /* v8 ignore next -- fail-safe: an audit write failure never blocks the redelivery suppression itself */
+      () => undefined,
+    );
+    return true;
+  }
+
+  const aiCostBearing = isAiCostBearingCommand(args.command);
+  /* v8 ignore next -- resolveRepositorySettings always resolves a concrete positive integer; the undefined side is defensive against the field's optional TS type. */
+  const maxPerWindow = aiCostBearing
+    ? (args.settings.commandRateLimitAiMaxPerWindow ?? 5)
+    : (args.settings.commandRateLimitMaxPerWindow ?? 20);
+  /* v8 ignore next -- resolveRepositorySettings always resolves a concrete positive integer; the undefined side is defensive against the field's optional TS type. */
+  const windowHours = args.settings.commandRateLimitWindowHours ?? 24;
+  const sinceIso = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const priorInvocations = await countRecentAuditEventsForActorAndTarget(env, args.commenter, COMMAND_RATE_LIMIT_EVENT_TYPE, targetKey, sinceIso);
+  const invocationCount = priorInvocations + 1; // this invocation counts too
+
+  // Always record the invocation first so the running count reflects reality even when the rest of this
+  // handler short-circuits below (a failed recordAuditEvent must never block command dispatch).
+  await recordAuditEvent(env, {
+    eventType: COMMAND_RATE_LIMIT_EVENT_TYPE,
+    actor: args.commenter,
+    targetKey,
+    outcome: "completed",
+    detail: `invocation ${invocationCount}/${maxPerWindow} within ${windowHours}h window`,
+    metadata: { deliveryId: args.deliveryId, repoFullName: args.repoFullName, command: args.command, aiCostBearing },
+  }).catch(
+    /* v8 ignore next -- fail-safe: an audit write failure never blocks command dispatch */
+    () => undefined,
+  );
+
+  if (invocationCount <= maxPerWindow) return false; // under threshold — normal dispatch proceeds unchanged
+
+  if (args.mode === "live") {
+    await createIssueComment(
+      env,
+      args.installationId,
+      args.repoFullName,
+      args.issueNumber,
+      `@${args.commenter} the \`${args.command}\` command has reached its rate limit (${maxPerWindow} within ${windowHours}h). Please wait for the window to pass before trying again. This is an automated maintenance action.`,
+    ).catch(
+      /* v8 ignore next -- fail-safe: a comment-post failure must not crash the throttle decision itself */
+      () => undefined,
+    );
+  }
+  await recordAuditEvent(env, {
+    eventType: "github_app.command_rate_limit_applied",
+    actor: "gittensory",
+    targetKey,
+    outcome: args.mode === "live" ? "completed" : "denied",
+    detail: `hold applied: ${args.commenter} invoked ${args.command} ${invocationCount} times (limit ${maxPerWindow})`,
+    metadata: { deliveryId: args.deliveryId, repoFullName: args.repoFullName, mode: args.mode, command: args.command },
+  }).catch(
+    /* v8 ignore next -- fail-safe: an audit write failure never blocks the handler */
+    () => undefined,
   );
   return true;
 }
@@ -9120,6 +9571,21 @@ async function maybeProcessGittensoryMentionCommand(
           : "skipped",
       metadata: { command: command.name, reason: authorization.reason },
     });
+    return true;
+  }
+
+  if (
+    await maybeThrottleGittensoryCommand(env, {
+      deliveryId,
+      repoFullName,
+      issueNumber: issue.number,
+      installationId,
+      commenter,
+      command: command.name,
+      settings,
+      mode: mentionMode,
+    })
+  ) {
     return true;
   }
 

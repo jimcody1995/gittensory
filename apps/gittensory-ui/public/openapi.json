@@ -8618,7 +8618,8 @@
           "reviewNagCooldownDays": {
             "type": "integer",
             "minimum": 0,
-            "exclusiveMinimum": true
+            "exclusiveMinimum": true,
+            "maximum": 365
           },
           "reviewNagLabel": {
             "type": "string"
@@ -8697,6 +8698,36 @@
           },
           "newAccountLabel": {
             "type": "string"
+          },
+          "commandRateLimitPolicy": {
+            "type": "string",
+            "enum": [
+              "off",
+              "hold"
+            ]
+          },
+          "commandRateLimitMaxPerWindow": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "commandRateLimitAiMaxPerWindow": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "commandRateLimitWindowHours": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "lockfileIntegrityGateMode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "advisory",
+              "block"
+            ]
           }
         },
         "required": [

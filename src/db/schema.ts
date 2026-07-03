@@ -106,6 +106,12 @@ export const repositorySettings = sqliteTable("repository_settings", {
   // runAgentMaintenancePlanAndExecute, not here.
   accountAgeThresholdDays: integer("account_age_threshold_days"),
   newAccountLabel: text("new_account_label").notNull().default("new-account"),
+  // Per-command @gittensory rate limit (#2560, anti-abuse): generalizes review-nag's cooldown pattern to every
+  // command, keyed by (actor, command, targetKey) independent of review-nag's own thread-author-only scope.
+  commandRateLimitPolicy: text("command_rate_limit_policy").notNull().default("off"),
+  commandRateLimitMaxPerWindow: integer("command_rate_limit_max_per_window").notNull().default(20),
+  commandRateLimitAiMaxPerWindow: integer("command_rate_limit_ai_max_per_window").notNull().default(5),
+  commandRateLimitWindowHours: integer("command_rate_limit_window_hours").notNull().default(24),
   createdAt: text("created_at").notNull().$defaultFn(() => nowIso()),
   updatedAt: text("updated_at").notNull().$defaultFn(() => nowIso()),
 });
@@ -1187,6 +1193,11 @@ export const aiReviewCache = sqliteTable(
     reviewerCount: integer("reviewer_count").notNull(),
     findingsJson: text("findings_json").notNull().default("[]"),
     metadataJson: text("metadata_json").notNull().default("{}"),
+    // #regate-churn: 1 (default) = a genuine, indefinitely-reusable review; 0 = a non-cacheable outcome
+    // (consensus defect / inconclusive / lock-contention placeholder) that is still PERSISTED so a repeated
+    // scheduled sweep pass at the identical head+fingerprint can reuse it for a bounded cooldown instead of
+    // re-spending an LLM call on every tick, without ever being treated as a durable, indefinitely-trustworthy hit.
+    cacheable: integer("cacheable").notNull().default(1),
     createdAt: text("created_at").notNull().$defaultFn(() => nowIso()),
   },
   (table) => ({

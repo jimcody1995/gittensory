@@ -143,6 +143,15 @@ gate:
   size:
     mode: off
 
+  # Lockfile-tamper-risk gate. Scans a changed package-lock.json diff for a
+  # resolved/integrity value that changed WITHOUT the same package's version
+  # changing in a changed package.json, or a resolved URL outside
+  # registry.npmjs.org — the classic supply-chain hand-edit tell. Distinct
+  # from the OSV.dev known-CVE dependency scan (a different threat model).
+  # off | advisory | block. Default: off. Config-as-code only — no DB column
+  # or dashboard toggle; this can only be set here.
+  lockfileIntegrity: off
+
   # Composite merge-readiness gate (no min score).
   # off | advisory | block. Default: off.
   mergeReadiness: off
@@ -325,7 +334,7 @@ settings:
   # a dedicated closeIssue primitive lands) with a clear reason. Off by default.
   # reviewNagPolicy: off      # off | hold | close. Default: off.
   # reviewNagMaxPings: 3      # Positive integer. Pings above this within the cooldown window trigger the policy. Default: 3.
-  # reviewNagCooldownDays: 5  # Positive integer. Window the ping count is measured over. Default: 5.
+  # reviewNagCooldownDays: 5  # Positive integer up to 365. Window the ping count is measured over. Default: 5.
   # reviewNagLabel: review-nag-cooldown  # Label applied alongside the hold/close action. Default: review-nag-cooldown.
 
   # Shared repo-scoped exemption list (#2463): GitHub logins never throttled/closed by gittensory's
@@ -339,3 +348,12 @@ settings:
   # Never fires for the repo owner, admin logins, or automation bots. PR-path only. Off by default.
   # accountAgeThresholdDays: null  # Positive integer, or null/omitted to disable. Default: null (off).
   # newAccountLabel: new-account  # Label applied to a below-threshold-age account's PR. Default: new-account.
+
+  # Per-command @gittensory rate limit (#2560, anti-abuse): generalizes review-nag's cooldown pattern to
+  # EVERY @gittensory command (help/ask/preflight/blockers/... and the maintainer queue-digest commands),
+  # not just review-request pings — independent of review-nag's own thread-author-only scope. "hold"
+  # replies with a cooldown notice and skips the command's own dispatch. Off by default.
+  # commandRateLimitPolicy: off             # off | hold. Default: off.
+  # commandRateLimitMaxPerWindow: 20        # Positive integer. Per-command invocation limit for a CHEAP command (cache-only, no AI call) within the window. Default: 20.
+  # commandRateLimitAiMaxPerWindow: 5       # Positive integer. Tighter limit for an AI-cost-bearing command (ask/blockers/preflight/reviewability/packet/duplicate-check/next-action/repo-fit). Default: 5.
+  # commandRateLimitWindowHours: 24         # Positive integer. Rolling window (hours) both limits above count against. Default: 24.
