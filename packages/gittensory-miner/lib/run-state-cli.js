@@ -10,10 +10,12 @@ function parseRepoArg(value, usage) {
   if (!value) return { error: usage };
   const trimmed = value.trim();
   const [owner, repo, extra] = trimmed.split("/");
-  if (!owner || !repo || extra !== undefined) {
+  const normalizedOwner = owner?.trim();
+  const normalizedRepo = repo?.trim();
+  if (!normalizedOwner || !normalizedRepo || extra !== undefined) {
     return { error: "Repository must be in owner/repo form." };
   }
-  return { repoFullName: `${owner}/${repo}` };
+  return { repoFullName: `${normalizedOwner}/${normalizedRepo}` };
 }
 
 export function parseStateGetArgs(args) {
@@ -80,13 +82,18 @@ export function runStateGet(args) {
     return 2;
   }
 
-  const state = getRunState(parsed.repoFullName);
-  if (parsed.json) {
-    console.log(JSON.stringify({ repoFullName: parsed.repoFullName, state }));
-  } else {
-    console.log(state ?? "none");
+  try {
+    const state = getRunState(parsed.repoFullName);
+    if (parsed.json) {
+      console.log(JSON.stringify({ repoFullName: parsed.repoFullName, state }));
+    } else {
+      console.log(state ?? "none");
+    }
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 2;
   }
-  return 0;
 }
 
 export function runStateSet(args) {

@@ -12,12 +12,15 @@ vi.mock("../../packages/gittensory-miner/lib/run-state.js", () => ({
 const {
   parseStateGetArgs,
   parseStateSetArgs,
+  runStateCli,
   runStateGet,
   runStateSet,
 } = await import("../../packages/gittensory-miner/lib/run-state-cli.js");
 
 afterEach(() => {
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
+  getRunState.mockReset();
+  setRunState.mockReset();
 });
 
 describe("gittensory-miner state CLI", () => {
@@ -26,6 +29,10 @@ describe("gittensory-miner state CLI", () => {
       error: expect.stringContaining("Usage: gittensory-miner state get"),
     });
     expect(parseStateGetArgs(["acme/widgets", "--json"])).toEqual({
+      repoFullName: "acme/widgets",
+      json: true,
+    });
+    expect(parseStateGetArgs(["acme /widgets", "--json"])).toEqual({
       repoFullName: "acme/widgets",
       json: true,
     });
@@ -67,5 +74,21 @@ describe("gittensory-miner state CLI", () => {
     expect(runStateSet(["not-a-repo", "idle"])).toBe(2);
     expect(error).toHaveBeenCalledWith("Repository must be in owner/repo form.");
     expect(setRunState).not.toHaveBeenCalled();
+  });
+
+  it("runStateGet returns exit code 2 when the store read fails", () => {
+    getRunState.mockImplementation(() => {
+      throw new Error("database locked");
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(runStateGet(["acme/widgets"])).toBe(2);
+    expect(error).toHaveBeenCalledWith("database locked");
+  });
+
+  it("runStateCli rejects unknown subcommands with state-specific usage", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(runStateCli(undefined, [])).toBe(2);
+    expect(runStateCli("list", [])).toBe(2);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Usage: gittensory-miner state get"));
   });
 });
