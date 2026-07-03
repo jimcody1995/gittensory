@@ -1270,10 +1270,13 @@ export function isCodeFile(file: string): boolean {
   // cs/swift/groovy round out the JVM/.NET/Swift set: isTestPath already
   // recognizes their `SomethingTest(s)`/`Spec` test files, so their source must
   // count as code too — otherwise a C#/Swift/Groovy source file is neither test
-  // nor code in the local scorer.
+  // nor code in the local scorer. vue/svelte/astro align with review/rag.ts's
+  // CODE_EXT_RE and review/visual/paths.ts so front-end framework source is not
+  // misclassified as "other" in slop signals or the missing-tests check.
   return (
-    /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rb|rs|kt|scala|java|go|sql|cs|swift|groovy)$/i.test(file) &&
-    !isTestFile(file)
+    /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rb|rs|kt|scala|java|go|sql|cs|swift|groovy|vue|svelte|astro)$/i.test(
+      file,
+    ) && !isTestFile(file)
   );
 }
 

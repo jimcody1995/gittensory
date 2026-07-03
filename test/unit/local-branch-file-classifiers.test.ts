@@ -122,6 +122,11 @@ describe("isCodeFile", () => {
       "Api/Controllers/UserController.cs",
       "Sources/App/Router.swift",
       "src/main/groovy/Pipeline.groovy",
+      // Front-end framework source — already indexed as code by rag.ts and flagged
+      // as visual paths, but must count as code for slop/missing-tests signals.
+      "src/App.vue",
+      "src/Widget.svelte",
+      "src/pages/index.astro",
     ]) {
       expect(isCodeFile(path)).toBe(true);
     }
