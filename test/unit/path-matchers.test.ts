@@ -50,6 +50,8 @@ describe("isGeneratedFile", () => {
       "dist/App.vue.map",
       "dist/Card.svelte.map",
       "dist/page.astro.map",
+      "dist/styles.scss.map",
+      "dist/theme.less.map",
     ]) {
       expect(isGeneratedFile(path)).toBe(true);
     }
