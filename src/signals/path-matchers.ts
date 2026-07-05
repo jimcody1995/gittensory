@@ -73,10 +73,10 @@ function isGeneratedFileFrom(parts: NormalizedPath): boolean {
     /\.(g|freezed|gr)\.dart$/.test(norm) ||
     // C# codegen: WinForms/WPF designer partials (`.designer.cs`) and XAML/T4 output (`.g.cs`).
     /\.(designer|g)\.cs$/.test(norm) ||
-    // Source maps for bundler/front-end output across JS/TS, frameworks, stylesheets, HTML, and SVG.
+    // Source maps for bundler/front-end output across JS/TS, frameworks, stylesheets, HTML, SVG, and WASM.
     // `.mjs`/`.cjs` are already recognized code extensions (isCodeFile), so their bundlers'
     // `.mjs.map` / `.cjs.map` maps are generated output too — the same as `.js.map`.
-    /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte|astro|mdx|scss|sass|less|html|svg|css)\.map$/.test(norm) ||
+    /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte|astro|mdx|scss|sass|less|html|svg|css|wasm)\.map$/.test(norm) ||
     base === "worker-configuration.d.ts"
   );
 }

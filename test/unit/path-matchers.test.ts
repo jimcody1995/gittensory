@@ -38,7 +38,7 @@ describe("isGeneratedFile", () => {
     }
   });
 
-  it("matches source maps for every first-class JS/TS, MDX, HTML, SVG, Sass/SCSS/Less, and front-end framework extension", () => {
+  it("matches source maps for JS/TS, MDX, HTML, SVG, WASM, Sass/SCSS/Less, and front-end framework extensions", () => {
     // `.mjs`/`.cjs` are recognized code extensions (isCodeFile), so their bundlers' source
     // maps are generated output too — the same as `.js.map` / `.tsx.map`.
     for (const path of [
@@ -56,9 +56,11 @@ describe("isGeneratedFile", () => {
       "dist/theme.less.map",
       "dist/index.html.map",
       "dist/icon.svg.map",
+      "dist/pkg.wasm.map",
     ]) {
       expect(isGeneratedFile(path)).toBe(true);
     }
+    expect(classifyChangedFile("dist/pkg.wasm.map")).toBe("generated");
   });
 
   it("matches C++ protobuf output alongside the Go/TS/JS plugins", () => {
@@ -443,6 +445,7 @@ describe("classifyChangedFile", () => {
       ["proto/messages.pb.erl", "generated"],
       ["proto/messages.pb.hrl", "generated"],
       ["proto/messages.pb.cr", "generated"],
+      ["dist/pkg.wasm.map", "generated"],
       ["vendor/lib.go", "vendored"],
       ["package-lock.json", "lockfile"],
       ["bun.lock", "lockfile"],
