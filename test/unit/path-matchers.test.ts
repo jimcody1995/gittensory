@@ -144,6 +144,12 @@ describe("isGeneratedFile", () => {
     expect(classifyChangedFile("gen/GreeterGrpcKt.kt")).toBe("generated");
   });
 
+  it("matches Java gRPC service stubs alongside the other protoc plugins", () => {
+    expect(isGeneratedFile("gen/GreeterGrpc.java")).toBe(true);
+    expect(isGeneratedFile("src/Greeter.java")).toBe(false);
+    expect(classifyChangedFile("gen/GreeterGrpc.java")).toBe("generated");
+  });
+
   it("matches JavaScript and TypeScript grpc-node protobuf stubs alongside the other protoc plugins", () => {
     expect(isGeneratedFile("gen/service_pb.js")).toBe(true);
     expect(isGeneratedFile("gen/service_grpc_pb.js")).toBe(true);
@@ -488,6 +494,7 @@ describe("classifyChangedFile", () => {
       ["gen/service_pb.nim", "generated"],
       ["gen/service_pb.lua", "generated"],
       ["gen/GreeterGrpcKt.kt", "generated"],
+      ["gen/GreeterGrpc.java", "generated"],
       ["gen/service_grpc_pb.js", "generated"],
       ["gen/service_pb.d.ts", "generated"],
       ["vendor/lib.go", "vendored"],
