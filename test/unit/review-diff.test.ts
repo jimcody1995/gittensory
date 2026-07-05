@@ -18,6 +18,13 @@ describe("diffFilePriority — source survives, noise drops first", () => {
     }
   });
 
+  it("ranks bytecode and archive artifacts as noise(4), not source(0)", () => {
+    for (const path of ["build/App.class", "lib/service.jar", "__pycache__/mod.pyc", "gen/stub.pyo"]) {
+      expect(diffFilePriority(path)).toBe(4);
+      expect(diffFilePriority(path)).toBeGreaterThan(diffFilePriority("src/a.ts"));
+    }
+  });
+
   it("ranks every path-matchers lockfile as noise(4), not source(0)", () => {
     for (const path of ["bun.lock", "uv.lock", "deno.lock", "flake.lock", "mix.lock", "chart.lock"]) {
       expect(diffFilePriority(path)).toBe(4);
