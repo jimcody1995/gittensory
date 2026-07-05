@@ -10655,7 +10655,19 @@ async function closeReviewEvasionSelfCloseIfActive(
     // this enforcement. Propagate so the queue's own retry/backoff re-processes this job; on retry, the live
     // freshness check earlier in this function will see the PR as open (current, since we just reopened it)
     // and this handler will attempt the re-close again, converging once closePullRequest actually succeeds.
-    throw closeError instanceof Error ? closeError : new Error(errorMessage(closeError));
+    // The `else` (closeError NOT an Error, falling through to the normalization below) is unreachable in
+    // practice -- closePullRequest's only failure path is Octokit's `request()` call, which always rejects
+    // with a RequestError (an Error subclass), never a raw thrown value -- but `closeError` is typed
+    // `unknown`, so the fallback below stays as a type-safe normalization. The `if` body itself (the real
+    // rethrow) IS reachable and IS exercised by the existing re-close-failure tests -- only the else branch
+    // (this `if`'s implicit non-Error path) and the fallback statement below are ignored. Concretely: a 500
+    // from GitHub on the re-close PATCH makes closePullRequest reject with a RequestError, which is exactly
+    // what test/unit/queue.test.ts's "REGRESSION (gate-flagged): a retry after the re-close failure
+    // converges -- the PR ends up closed, and the strike is recorded exactly once" drives through this `if`.
+    /* v8 ignore else */
+    if (closeError instanceof Error) throw closeError;
+    /* v8 ignore next -- unreachable, see above. */
+    throw new Error(errorMessage(closeError));
   }
 
   // The close succeeded: post the public explanation, apply the configured label, record the strike -- in
