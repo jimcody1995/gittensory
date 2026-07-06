@@ -210,6 +210,16 @@ describe("isGeneratedFile", () => {
     expect(classifyChangedFile("gen/service_pb.d.ts")).toBe("generated");
   });
 
+  it("matches alternate Objective-C protobuf spellings alongside pbobjc output", () => {
+    expect(isGeneratedFile("proto/foo.pb.objc.h")).toBe(true);
+    expect(isGeneratedFile("proto/messages.pb.objc.m")).toBe(true);
+    expect(isGeneratedFile("proto/messages.pb.m")).toBe(true);
+    expect(isGeneratedFile("src/App.m")).toBe(false);
+    expect(isGeneratedFile("src/App.h")).toBe(false);
+    expect(classifyChangedFile("proto/foo.pb.objc.h")).toBe("generated");
+    expect(classifyChangedFile("proto/messages.pb.m")).toBe("generated");
+  });
+
   it("matches Swift protobuf, Dart freezed/retrofit, C# designer/XAML, and Objective-C protoc output", () => {
     for (const path of [
       "proto/messages.pb.swift",
@@ -546,6 +556,8 @@ describe("classifyChangedFile", () => {
       ["gen/GreeterGrpcKt.kt", "generated"],
       ["gen/GreeterGrpc.java", "generated"],
       ["proto/messages.pb.java", "generated"],
+      ["proto/foo.pb.objc.h", "generated"],
+      ["proto/messages.pb.m", "generated"],
       ["gen/GreeterGrpc.cs", "generated"],
       ["lib/foo.pbgrpc.dart", "generated"],
       ["gen/service_grpc_pb.js", "generated"],

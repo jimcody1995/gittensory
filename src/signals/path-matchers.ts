@@ -79,7 +79,8 @@ function isGeneratedFileFrom(parts: NormalizedPath): boolean {
     // the Kotlin plugin emits `.pb.kt`, the Java plugin emits `.pb.java`, the C# plugin emits `.pb.cs`, the Rust plugin emits `.pb.rs`,
     // the Elixir plugin emits `.pb.ex`, the Erlang gpb plugin emits `.pb.erl` / `.pb.hrl`, the Crystal
     // plugin emits `.pb.cr`, the Haskell plugin emits `.pb.hs`, the Scala plugin emits `.pb.scala`, and the Objective-C plugin emits
-    // `.pbobjc.{h,m}` plus gRPC `.pbrpc.{h,m}` service stubs. Swift gRPC emits sibling `.grpc.swift`
+    // `.pbobjc.{h,m}` plus gRPC `.pbrpc.{h,m}` service stubs (some layouts spell these
+    // `.pb.objc.{h,m}` instead). Swift gRPC emits sibling `.grpc.swift`
     // service stubs; grpc-kotlin emits sibling `*GrpcKt.kt` coroutine service stubs; grpc-java emits
     // sibling `*Grpc.java` service stubs; grpc-dotnet emits sibling `*Grpc.cs` service stubs; the Dart
     // gRPC plugin emits sibling `.pbgrpc.dart` service stubs.
@@ -91,6 +92,8 @@ function isGeneratedFileFrom(parts: NormalizedPath): boolean {
     /grpc\.cs$/.test(norm) ||
     /\.pbgrpc\.dart$/.test(norm) ||
     /\.pbobjc\.(h|m)$/.test(norm) ||
+    /\.pb\.objc\.(h|m)$/i.test(norm) ||
+    /\.pb\.m$/.test(norm) ||
     /\.pbrpc\.(h|m)$/.test(norm) ||
     // Python protobuf: message stubs are `*_pb2.py[i]`; the gRPC plugin emits sibling
     // `*_pb2_grpc.py[i]` service stubs, which are the same machine-generated output.
