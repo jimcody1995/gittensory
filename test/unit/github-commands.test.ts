@@ -8,6 +8,7 @@ import {
   parseAgentCommandFeedbackContext,
   parseGittensoryMentionCommand,
   sanitizePublicComment,
+  suggestCommand,
   githubCommandsInternals,
 } from "../../src/github/commands";
 
@@ -30,7 +31,7 @@ describe("GitHub mention commands", () => {
     expect(parseGittensoryMentionCommand("@gittensory review-now")?.name).toBe("review-now");
     expect(parseGittensoryMentionCommand("@gittensory needs-author")?.name).toBe("needs-author");
     expect(parseGittensoryMentionCommand("@gittensory duplicate-clusters")?.name).toBe("duplicate-clusters");
-    expect(parseGittensoryMentionCommand("@gittensory unknown")?.name).toBe("help");
+    expect(parseGittensoryMentionCommand("@gittensory unknown")).toMatchObject({ name: "help", unknownVerb: "unknown" });
     // gate-override is an action command: it must be recognized (NOT downgraded to "help") and carry the
     // trailing free text as its reason.
     expect(parseGittensoryMentionCommand("@gittensory gate-override")).toMatchObject({ name: "gate-override", reason: undefined });
@@ -45,6 +46,9 @@ describe("GitHub mention commands", () => {
     expect(parseGittensoryMentionCommand("@gittensory2 preflight")).toBeNull();
     expect(isMaintainerOnlyCommand("queue-summary")).toBe(true);
     expect(isMaintainerOnlyCommand("preflight")).toBe(false);
+    expect(parseGittensoryMentionCommand("@gittensory")?.unknownVerb).toBeUndefined();
+    expect(parseGittensoryMentionCommand("@gittensory help")?.unknownVerb).toBeUndefined();
+    expect(parseGittensoryMentionCommand("@gittensory preflight")?.unknownVerb).toBeUndefined();
   });
 
   it("authorizes maintainers and confirmed miner PR authors only", () => {
@@ -516,6 +520,25 @@ describe("GitHub mention commands", () => {
     expect(help).toContain("Freshness: shipped command list.");
     expect(help).toContain("<summary>Additional safe details</summary>");
     expect(help).toContain("@gittensory next-action");
+
+    const typoHelp = buildPublicAgentCommandComment({
+      command: parseGittensoryMentionCommand("@gittensory prefight")!,
+      repo: null,
+      issue: { number: 4, title: "PR", state: "open", pull_request: {} },
+      pullRequest: null,
+      actorKind: "maintainer",
+    });
+    expect(typoHelp).toContain("Did you mean `@gittensory preflight`?");
+    expect(help).not.toContain("Did you mean");
+
+    const gibberishHelp = buildPublicAgentCommandComment({
+      command: parseGittensoryMentionCommand("@gittensory xyzzyplugh")!,
+      repo: null,
+      issue: { number: 5, title: "PR", state: "open", pull_request: {} },
+      pullRequest: null,
+      actorKind: "maintainer",
+    });
+    expect(gibberishHelp).not.toContain("Did you mean");
 
     const minerFallback = buildPublicAgentCommandComment({
       command: parseGittensoryMentionCommand("@gittensory miner-context")!,
@@ -1929,6 +1952,27 @@ describe("GitHub mention commands", () => {
     expect(digest.repoFullName).toBe("this repository");
     expect(digest.reviewNowPullRequests).toHaveLength(0);
     expect(digest.needsAuthorPullRequests).toHaveLength(0);
+  });
+});
+
+describe("suggestCommand (#2170)", () => {
+  it("suggests the nearest known command for a close typo", () => {
+    expect(suggestCommand("prefight")).toBe("preflight");
+    expect(suggestCommand("blokcers")).toBe("blockers");
+    expect(suggestCommand("reveiw-now")).toBe("review-now");
+  });
+
+  it("returns null for gibberish, empty input, and already-known verbs", () => {
+    expect(suggestCommand("xyzzyplugh")).toBeNull();
+    expect(suggestCommand("")).toBeNull();
+    expect(suggestCommand(null)).toBeNull();
+    expect(suggestCommand("preflight")).toBeNull();
+    expect(suggestCommand("gate-override")).toBeNull();
+  });
+
+  it("respects the edit-distance threshold at the boundary", () => {
+    expect(suggestCommand("prefligt")).toBe("preflight");
+    expect(suggestCommand("zzzzzzzzzz")).toBeNull();
   });
 });
 
