@@ -136,6 +136,16 @@ describe("buildPublicQualityTrend", () => {
       [
         pr(1, "closed", { updatedAt: "also-not-a-date", createdAt: "still-not-a-date" }),
         pr(2, "merged", { mergedAt: `${currentMonday}T12:00:00.000Z` }),
+        {
+          repoFullName: "owner/repo",
+          number: 3,
+          title: "Closed via createdAt",
+          state: "closed",
+          mergedAt: null,
+          labels: [],
+          linkedIssues: [],
+          createdAt: `${currentMonday}T11:00:00.000Z`,
+        },
       ],
       NOW,
       1,
@@ -144,8 +154,12 @@ describe("buildPublicQualityTrend", () => {
       gateBlocked: 1,
       gateBlockedThenMerged: 1,
       outcomesMerged: 1,
-      outcomesClosed: 0,
+      outcomesClosed: 1,
     });
+  });
+
+  it("uses the Monday UTC week-start path for non-Sunday timestamps", () => {
+    expect(isoWeekStart(Date.parse("2026-06-16T12:00:00.000Z"))).toBe("2026-06-16");
   });
 });
 
