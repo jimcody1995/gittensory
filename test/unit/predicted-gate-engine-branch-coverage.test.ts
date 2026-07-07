@@ -554,6 +554,73 @@ describe("predicted-gate engine branch coverage (#2283)", () => {
     expect(closedPr.components.find((c) => c.key === "pr_state")?.score).toBe(3);
     expect(closedPr.components.find((c) => c.key === "change_scope")?.evidence).toContain("1 linked issue");
   });
+
+  it("covers lane_not_recommended maintainer branches and scoped overlap pluralization", () => {
+    const inactiveRepo = { ...REPO, registryConfig: { ...REPO.registryConfig!, emissionShare: 0 } };
+    const maintainerLane = buildPreflightResult(
+      { repoFullName: REPO.fullName, title: "Fix", body: "Closes #7", linkedIssues: [7], authorAssociation: "OWNER" },
+      inactiveRepo,
+      [],
+      [],
+    );
+    const contributorLane = buildPreflightResult(
+      { repoFullName: REPO.fullName, title: "Fix", body: "Closes #7", linkedIssues: [7], authorAssociation: "CONTRIBUTOR" },
+      inactiveRepo,
+      [],
+      [],
+    );
+    expect(maintainerLane.findings.find((finding) => finding.code === "lane_not_recommended")).toMatchObject({
+      severity: "info",
+      title: "Repo lane unavailable for contributor scoring",
+      detail: expect.stringContaining("Maintainer-authored work is treated as repo stewardship"),
+      action: "No action.",
+    });
+    expect(contributorLane.findings.find((finding) => finding.code === "lane_not_recommended")).toMatchObject({
+      severity: "warning",
+      title: "Repo lane is not ready for a confident recommendation",
+      action: "Refresh registry data or choose a registered active repo.",
+    });
+
+    const missingRepo = { ...REPO, isRegistered: false, registryConfig: null };
+    const ownerUnknownLane = buildPreflightResult(
+      { repoFullName: missingRepo.fullName, title: "Fix", body: "Closes #7", linkedIssues: [7], authorAssociation: "OWNER" },
+      missingRepo,
+      [],
+      [],
+      [],
+      null,
+      true,
+    );
+    const outsideUnknownLane = buildPreflightResult(
+      { repoFullName: missingRepo.fullName, title: "Fix", body: "Closes #7", linkedIssues: [7], authorAssociation: "CONTRIBUTOR" },
+      missingRepo,
+      [],
+      [],
+      [],
+      null,
+      true,
+    );
+    expect(ownerUnknownLane.findings.find((finding) => finding.code === "lane_not_recommended")?.severity).toBe("info");
+    expect(outsideUnknownLane.findings.find((finding) => finding.code === "lane_not_recommended")?.severity).toBe("warning");
+
+    const preflight = buildPreflightResult({ repoFullName: REPO.fullName, title: "Fix", body: "", linkedIssues: [7], changedFiles: ["src/a.ts"] }, REPO, [], []);
+    const singularOverlap = buildPublicReadinessScore({
+      pr: { ...pr(REPO.fullName, 6, "Fix"), linkedIssues: [7] },
+      preflight,
+      queueHealth: buildQueueHealth(REPO, [], [], buildCollisionReport(REPO.fullName, [], [])),
+      scopedOverlapCount: 1,
+      linkedDuplicatePrs: [],
+    });
+    const pluralOverlap = buildPublicReadinessScore({
+      pr: { ...pr(REPO.fullName, 7, "Fix"), linkedIssues: [7] },
+      preflight,
+      queueHealth: buildQueueHealth(REPO, [], [], buildCollisionReport(REPO.fullName, [], [])),
+      scopedOverlapCount: 2,
+      linkedDuplicatePrs: [],
+    });
+    expect(singularOverlap.components.find((component) => component.key === "related_work")?.evidence).toBe("1 scoped overlap found.");
+    expect(pluralOverlap.components.find((component) => component.key === "related_work")?.evidence).toBe("2 scoped overlaps found.");
+  });
 });
 
 function repo(fullName: string, overrides: Partial<RegistryRepoConfig> = {}): RepositoryRecord {
