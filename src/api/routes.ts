@@ -21,6 +21,7 @@ import {
   extractBrowserSessionToken,
   extractCookieValue,
   isAuthorizedGitHubSessionLogin,
+  isMcpReadRepoAllowed,
   isMcpReadUnscoped,
   revokeSession,
   timingSafeEqual,
@@ -176,9 +177,11 @@ import {
 } from "../services/miner-dashboard-recommendations";
 import {
   buildStaticControlPanelRoleSummary,
+  canLoginAccessRepo,
   loadControlPanelAccessScope,
   loadControlPanelRoleSummary,
 } from "../services/control-panel-roles";
+import { runFindOpportunities, validateFindOpportunitiesInput, type FindOpportunitiesInput } from "../mcp/find-opportunities";
 import {
   buildMcpCompatibilityMetadata,
   LATEST_RECOMMENDED_MCP_VERSION,
@@ -2781,6 +2784,31 @@ export function createApp() {
     return c.json({ ...buildIssueSlopAssessment(parsed.data), rubric: ISSUE_SLOP_RUBRIC_MARKDOWN });
   });
 
+  app.post(OPPORTUNITIES_FIND_PATH, async (c) => {
+    const identity = await authenticateRequestIdentity(c);
+    /* v8 ignore next -- Protected middleware rejects unauthenticated private routes before route-specific guards. */
+    if (!identity) return c.json({ error: "unauthorized" }, 401);
+    const body = await c.req.json().catch(() => null);
+    const parsed = validateFindOpportunitiesInput((body ?? {}) as FindOpportunitiesInput);
+    if (!parsed.ok) {
+      return c.json({ status: "invalid_request", ranked: [], totalCandidates: 0, reason: parsed.reason }, 400);
+    }
+    if (parsed.value.searchQuery) {
+      const forbidden = await requireDiscoveryAccessForApi(c, identity);
+      if (forbidden) return forbidden;
+    } else {
+      for (const target of parsed.value.targets ?? []) {
+        const fullName = `${target.owner}/${target.repo}`;
+        const forbidden = await requireApiRepoReadAccess(c, identity, fullName);
+        if (forbidden) return forbidden;
+      }
+    }
+    const result = await runFindOpportunities(c.env, parsed.value, {
+      canAccessRepo: (repoFullName) => canApiAccessRepo(c.env, identity, repoFullName),
+    });
+    return c.json(result);
+  });
+
   app.post("/v1/preflight/pr", async (c) => {
     const body = await c.req.json().catch(() => null);
     const parsed = preflightSchema.safeParse(body);
@@ -5139,6 +5167,7 @@ function contributorEvidenceFromProfile(profile: {
 
 const EXTENSION_PULL_CONTEXT_PATH = "/v1/extension/pull-context";
 const EXTENSION_PULL_CONTEXT_SCOPE = "extension:pull_context";
+const OPPORTUNITIES_FIND_PATH = "/v1/opportunities/find";
 const LINT_PR_TEXT_PATH = "/v1/lint/pr-text";
 const LINT_SLOP_RISK_PATH = "/v1/lint/slop-risk";
 const LINT_ISSUE_SLOP_PATH = "/v1/lint/issue-slop";
@@ -5151,7 +5180,7 @@ const EXTENSION_CONTRIBUTOR_CONTEXT_PATH = /^\/v1\/extension\/contributors\/[^/]
 type ProtectedRouteContext = {
   env: Env;
   req: { header: (name: string) => string | undefined | null };
-  json: (object: { error: string }, status?: number) => Response;
+  json: (object: { error: string; reason?: string }, status?: number) => Response;
 };
 
 function isExtensionScopedSession(identity: AuthIdentity): boolean {
@@ -5205,6 +5234,7 @@ function canSessionAccessPath(env: Env, identity: Extract<AuthIdentity, { kind: 
   if (isRepoAgentAuditFeedPath(path)) return true; // route's requireRepoMaintainer enforces per-repo authority (contributors → 403)
   if (isRepoAgentPendingActionsPath(path)) return true; // list-only: requireRepoMaintainer; decision POSTs require server tokens
   if (isRepoContributorIssueDraftGeneratePath(path)) return true;
+  if (path === OPPORTUNITIES_FIND_PATH) return true;
   if (path === LINT_PR_TEXT_PATH || path === LINT_SLOP_RISK_PATH || path === LINT_ISSUE_SLOP_PATH) return true;
   if (path === EXTENSION_PULL_CONTEXT_PATH && isExtensionScopedSession(identity)) return true;
   // Contributor extension scope reaches only `/v1/extension/contributors/<login>/*`; the handler's
@@ -5349,6 +5379,36 @@ async function requireExtensionPullContextRepoAccess(
   repo: RepositoryRecord | null,
 ): Promise<Response | null> {
   return requireSessionRepoAccess(c, identity, repoFullName, repo);
+}
+
+async function requireDiscoveryAccessForApi(c: ProtectedRouteContext, identity: AuthIdentity): Promise<Response | null> {
+  if (identity.kind === "session") {
+    if (isAuthorizedGitHubSessionLogin(c.env, identity.actor)) return null;
+    const scope = await loadControlPanelAccessScope(c.env, identity.actor);
+    if (scope.operator) return null;
+    return c.json({ error: "forbidden", reason: "cross_repo_search_requires_discovery_access" }, 403);
+  }
+  if (identity.kind === "static" && identity.actor === "mcp" && !isMcpReadUnscoped(c.env.MCP_READ_REPO_ALLOWLIST)) {
+    return c.json({ error: "forbidden", reason: "cross_repo_search_requires_unscoped_mcp_read" }, 403);
+  }
+  return null;
+}
+
+async function canApiAccessRepo(env: Env, identity: AuthIdentity, repoFullName: string): Promise<boolean> {
+  if (identity.kind === "session") return canLoginAccessRepo(env, identity.actor, repoFullName);
+  if (identity.kind === "static" && identity.actor === "mcp") {
+    return isMcpReadRepoAllowed(env.MCP_READ_REPO_ALLOWLIST, repoFullName);
+  }
+  return true;
+}
+
+async function requireApiRepoReadAccess(
+  c: ProtectedRouteContext,
+  identity: AuthIdentity,
+  repoFullName: string,
+): Promise<Response | null> {
+  if (await canApiAccessRepo(c.env, identity, repoFullName)) return null;
+  return c.json({ error: "forbidden_repo" }, 403);
 }
 
 async function requireSessionRepoAccess(
