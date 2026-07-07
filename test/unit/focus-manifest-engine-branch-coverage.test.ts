@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  gateConfigToJson,
   MAX_FOCUS_MANIFEST_BYTES,
   parseFocusManifest,
   parseFocusManifestContent,
@@ -110,5 +111,139 @@ describe("focus-manifest engine branch coverage (#2280)", () => {
     const parsed = parseFocusManifestContent(oversized);
     expect(parsed.present).toBe(false);
     expect(parsed.warnings.some((w) => w.includes(`${MAX_FOCUS_MANIFEST_BYTES} bytes`))).toBe(true);
+  });
+
+  it("serializes gate pack, slop-only mode, and partial cla blocks through gateConfigToJson", () => {
+    const gate = parseFocusManifest({
+      gate: {
+        pack: "oss-anti-slop",
+        slop: { mode: "block" },
+        cla: { checkRunName: "CLA" },
+      },
+    }).gate;
+    expect(gateConfigToJson(gate)).toMatchObject({
+      pack: "oss-anti-slop",
+      slop: { mode: "block" },
+      cla: { checkRunName: "CLA" },
+    });
+  });
+
+  it("parses sparse linkedIssueHardRules overlays and settings ai review fields", () => {
+    const parsed = parseFocusManifest({
+      settings: {
+        aiReviewProvider: "openai",
+        aiReviewModel: "gpt-4.1",
+        manualReviewLabel: "needs-human",
+        linkedIssueHardRules: {
+          ownerAssignedClose: "block",
+          assignedIssueClose: "off",
+          missingPointLabelClose: "block",
+          maintainerOnlyLabelClose: "off",
+          pointBearingLabels: ["gittensor:priority"],
+          maintainerOnlyLabels: ["maintainer-only"],
+          defaultLabelRepo: true,
+          verifyBeforeClose: false,
+          closeDelaySeconds: 45,
+        },
+      },
+    });
+    expect(parsed.settings.aiReviewProvider).toBe("openai");
+    expect(parsed.settings.aiReviewModel).toBe("gpt-4.1");
+    expect(parsed.settings.manualReviewLabel).toBe("needs-human");
+    expect(parsed.settings.linkedIssueHardRules).toMatchObject({
+      ownerAssignedClose: "block",
+      pointBearingLabels: ["gittensor:priority"],
+      closeDelaySeconds: 45,
+    });
+  });
+
+  it("accepts valid review enrichment toggles and rejects unsafe visual url templates", () => {
+    const enriched = parseFocusManifest({
+      review: {
+        enrichment: { dependency: true, secret: false },
+        visual: {
+          preview: { url_template: "http://127.0.0.1/pr-{number}" },
+        },
+      },
+    });
+    expect(enriched.review.enrichmentAnalyzers).toEqual({ dependency: true, secret: false });
+    expect(enriched.review.visual.preview.urlTemplate).toBeNull();
+    expect(enriched.warnings.some((w) => w.includes("url_template"))).toBe(true);
+  });
+
+  it("serializes review optional fields through reviewConfigToJson", () => {
+    const manifest = parseFocusManifest({
+      review: {
+        fixHandoff: true,
+        auto_merge_summary: false,
+        enrichment: { dependency: true },
+        labeling_rules: [{ label: "area:ui", title_contains: "ui" }],
+        linkedIssueSatisfaction: "advisory",
+        visual: { routes: { max_routes: 3 } },
+      },
+    });
+    expect(reviewConfigToJson(manifest.review)).toMatchObject({
+      fixHandoff: true,
+      auto_merge_summary: false,
+      enrichment: { dependency: true },
+      labeling_rules: [{ label: "area:ui", title_contains: "ui" }],
+      linkedIssueSatisfaction: "advisory",
+      visual: { routes: { max_routes: 3 } },
+    });
+  });
+
+  it("warns when a labeling rule entry omits label entirely", () => {
+    const parsed = parseFocusManifest({
+      review: {
+        labeling_rules: [{ when_paths: ["src/**"] }, { label: null, when_paths: ["docs/**"] }],
+      },
+    });
+    expect(parsed.review.labelingRules).toEqual([]);
+    expect(parsed.warnings.filter((w) => w.includes(".label")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("covers remaining serializer and parser branch edges", () => {
+    const slopScoreOnly = parseFocusManifest({ gate: { slop: { minScore: 55 } } });
+    expect(gateConfigToJson(slopScoreOnly.gate)).toEqual({ slop: { minScore: 55 } });
+
+    const invalidEnrichmentFlag = parseFocusManifest({
+      review: { enrichment: { dependency: "not-a-boolean" } },
+    });
+    expect(invalidEnrichmentFlag.review.enrichmentAnalyzers).toEqual({});
+    expect(invalidEnrichmentFlag.warnings.some((w) => w.includes("review.enrichment.dependency"))).toBe(true);
+
+    const missingLabelKey = parseFocusManifest({
+      review: { labeling_rules: [{ when_paths: ["src/**"] }] },
+    });
+    expect(missingLabelKey.warnings.some((w) => w.includes('.label" is required'))).toBe(true);
+
+    const explicitNullLabel = parseFocusManifest({
+      review: { labeling_rules: [{ label: null, when_paths: ["src/**"] }] },
+    });
+    expect(explicitNullLabel.warnings.some((w) => w.includes('.label" is required'))).toBe(true);
+
+    const notPublicSafeLabel = parseFocusManifest({
+      review: { labeling_rules: [{ label: "reward farming", when_paths: ["src/**"] }] },
+    });
+    expect(notPublicSafeLabel.review.labelingRules).toEqual([]);
+    expect(notPublicSafeLabel.warnings.some((w) => w.includes("review.labeling_rules[0].label"))).toBe(true);
+    expect(notPublicSafeLabel.warnings.some((w) => w.includes('.label" is required'))).toBe(false);
+
+    const emptyTemplate = parseFocusManifest({
+      review: { visual: { preview: { url_template: "" } } },
+    });
+    expect(emptyTemplate.review.visual.preview.urlTemplate).toBeNull();
+
+    const withInstructions = parseFocusManifest({
+      review: { instructions: "Prefer small diffs." },
+    });
+    expect(reviewConfigToJson(withInstructions.review)).toEqual({ instructions: "Prefer small diffs." });
+
+    const pathsOnlyRule = parseFocusManifest({
+      review: { labeling_rules: [{ label: "area:ui", when_paths: ["src/**"] }] },
+    });
+    expect(reviewConfigToJson(pathsOnlyRule.review)).toEqual({
+      labeling_rules: [{ label: "area:ui", when_paths: ["src/**"] }],
+    });
   });
 });
