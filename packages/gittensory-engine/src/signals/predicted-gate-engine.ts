@@ -268,7 +268,10 @@ export function buildQueueHealth(
     0,
     100,
   );
-  const level = burdenScore >= 80 ? "critical" : burdenScore >= 55 ? "high" : burdenScore >= 25 ? "medium" : "low";
+  let level: QueueHealth["level"] = "low";
+  if (burdenScore >= 80) level = "critical";
+  else if (burdenScore >= 55) level = "high";
+  else if (burdenScore >= 25) level = "medium";
   const findings: SignalFinding[] = [];
   if (unlinkedPullRequests.length > 0) {
     findings.push({

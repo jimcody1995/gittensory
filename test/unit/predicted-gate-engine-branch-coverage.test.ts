@@ -52,12 +52,16 @@ describe("predicted-gate engine branch coverage (#2283)", () => {
     };
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("missing_linked_issue"), advisory)).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("missing_linked_issue"), block)).toBe(true);
+    expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("duplicate_pr_risk"), advisory)).toBe(false);
+    expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("duplicate_pr_risk"), block)).toBe(true);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("ai_consensus_defect"), advisory)).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("ai_consensus_defect"), block)).toBe(true);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("ai_review_split"), advisory)).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("manifest_linked_issue_required"), advisory)).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("manifest_linked_issue_required"), block)).toBe(true);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("manifest_missing_tests"), advisory)).toBe(false);
+    expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("manifest_missing_tests"), block)).toBe(true);
+    expect(gateAdvisoryInternals.gatePolicyBlocks("off", "block")).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("self_authored_linked_issue"), advisory)).toBe(false);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("self_authored_linked_issue"), block)).toBe(true);
     expect(gateAdvisoryInternals.isConfiguredGateBlocker(finding("lockfile_tamper_risk"), advisory)).toBe(false);
@@ -398,6 +402,42 @@ describe("predicted-gate engine branch coverage (#2283)", () => {
       buildCollisionReport(REPO.fullName, [], []),
     );
     expect(staleDraftOnlyCreatedAt.findings.some((f) => f.code === "inactive_draft_prs")).toBe(true);
+
+    const lowBurdenQueue = buildQueueHealth(REPO, [], [], buildCollisionReport(REPO.fullName, [], []));
+    expect(lowBurdenQueue.level).toBe("low");
+    const mediumQueue = buildQueueHealth(
+      REPO,
+      [],
+      [1, 2, 3].map((number) => pr(REPO.fullName, number, `Unlinked ${number}`, { linkedIssues: [] })),
+      buildCollisionReport(REPO.fullName, [], []),
+    );
+    expect(mediumQueue.level).toBe("medium");
+    const highQueue = buildQueueHealth(
+      REPO,
+      [],
+      [1, 2, 3, 4].map((number) => pr(REPO.fullName, number, `Unlinked ${number}`, { linkedIssues: [] })),
+      buildCollisionReport(REPO.fullName, [], []),
+    );
+    expect(highQueue.level).toBe("high");
+    const criticalStale = [44, 45, 46, 47].map((number) =>
+      pr(REPO.fullName, number, `Stale ${number}`, { linkedIssues: [], updatedAt: "2000-01-01T00:00:00.000Z" }),
+    );
+    expect(buildQueueHealth(REPO, [], criticalStale, buildCollisionReport(REPO.fullName, [], criticalStale)).level).toBe("critical");
+
+    const bodyLinkedIssues = buildPreflightResult(
+      { repoFullName: REPO.fullName, title: "Fix", body: `closes ${REPO.fullName}#12 and fixes #8`, changedFiles: ["src/a.ts"] },
+      REPO,
+      [],
+      [],
+    );
+    expect(bodyLinkedIssues.linkedIssues).toEqual([8, 12]);
+    const mergedLinkedIssues = buildPreflightResult(
+      { repoFullName: REPO.fullName, title: "Fix", body: "closes #5", linkedIssues: [3], changedFiles: ["src/a.ts"] },
+      REPO,
+      [],
+      [],
+    );
+    expect(mergedLinkedIssues.linkedIssues).toEqual([3, 5]);
   });
 });
 

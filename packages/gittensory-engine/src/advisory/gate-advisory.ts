@@ -529,9 +529,7 @@ function isEvaluationBlocker(code: string, policy: GateCheckPolicy): boolean {
 }
 
 function gatePolicyBlocks(mode: GateRuleMode | undefined, defaultMode: GateRuleMode): boolean {
-  const effective = gateMode(mode ?? defaultMode);
-  if (effective === "block") return true;
-  return false;
+  return gateMode(mode ?? defaultMode) === "block";
 }
 
 function isConfiguredGateBlocker(finding: AdvisoryFinding, policy: GateCheckPolicy): boolean {
