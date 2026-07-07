@@ -122,6 +122,7 @@ import { isGlobalAgentPause, resolveAgentActionMode, resolveAgentPermissionReadi
 import { AGENT_ACTION_CLASSES, isActingAutonomyLevel, resolveAutonomy } from "../settings/autonomy";
 import { resolveRepositorySettings } from "../settings/repository-settings";
 import { MAX_FOCUS_MANIFEST_BYTES } from "../signals/focus-manifest";
+import { validateManifestConfig } from "../selfhost/config-lint";
 import { loadPublicRepoFocusManifest, loadRepoFocusManifest } from "../signals/focus-manifest-loader";
 import { buildPredictedGateVerdict } from "../rules/predicted-gate";
 import { buildIssueSlopAssessment, buildSlopAssessment } from "../signals/slop";
@@ -206,6 +207,10 @@ const lintPrTextShape = {
   commitMessages: z.array(z.string().max(PREFLIGHT_LIMITS.bodyChars)).max(50).optional(),
   prBody: z.string().max(PREFLIGHT_LIMITS.bodyChars).optional(),
   linkedIssue: z.number().int().positive().optional(),
+};
+
+const validateConfigShape = {
+  content: z.string().max(MAX_FOCUS_MANIFEST_BYTES),
 };
 
 const preflightShape = {
@@ -941,6 +946,13 @@ const lintPrTextOutputSchema = {
   summary: z.string().optional(),
   generatedAt: z.string().optional(),
 };
+const validateConfigOutputSchema = {
+  present: z.boolean().optional(),
+  normalized: z.unknown().optional(),
+  warnings: z.array(z.string()).optional(),
+  recognizedFields: z.array(z.string()).optional(),
+  summary: z.string().optional(),
+};
 // #550: output schemas for the remaining tools (preflight/score/local-branch/agent), so MCP clients can
 // machine-validate their results. Same lenient style as the schemas above — documented top-level keys,
 // all optional, complex values as z.unknown(). No behavior change; these mirror the existing payloads.
@@ -1419,6 +1431,17 @@ export class GittensoryMcp {
         outputSchema: lintPrTextOutputSchema,
       },
       async (input) => this.toolResult(this.lintPrText(input)),
+    );
+
+    server.registerTool(
+      "gittensory_validate_config",
+      {
+        description:
+          "Validate a supplied .gittensory.yml (or JSON) manifest string BEFORE pushing it, using the exact same tolerant parser the review stack runs — no parallel schema. Returns the normalized config, every parse warning (invalid values, unknown fields), and whether any recognized field was present. Metadata only; no repo context, no GitHub writes.",
+        inputSchema: validateConfigShape,
+        outputSchema: validateConfigOutputSchema,
+      },
+      async (input) => this.toolResult(await this.validateConfig(input)),
     );
 
     server.registerTool(
@@ -2281,6 +2304,23 @@ export class GittensoryMcp {
     return {
       summary: `Slop risk: ${assessment.band}.`,
       data: { band: assessment.band, findings: assessment.findings } as unknown as Record<string, unknown>,
+    };
+  }
+
+  private async validateConfig(input: z.infer<z.ZodObject<typeof validateConfigShape>>): Promise<ToolPayload> {
+    await this.enforceToolRateLimit("gittensory_validate_config");
+    const result = validateManifestConfig(input.content);
+    return {
+      summary:
+        result.warnings.length === 0
+          ? `Manifest valid: ${result.recognizedFields.length} recognized field${result.recognizedFields.length === 1 ? "" : "s"}, no warnings.`
+          : `Manifest has ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}.`,
+      data: {
+        present: result.present,
+        normalized: result.normalized,
+        warnings: result.warnings,
+        recognizedFields: result.recognizedFields,
+      } as unknown as Record<string, unknown>,
     };
   }
 

@@ -1,7 +1,7 @@
 import { listSignalSnapshots, persistSignalSnapshot } from "../db/repositories";
 import type { JsonValue } from "../types";
 import { nowIso } from "../utils/json";
-import { contentLaneConfigToJson, featuresConfigToJson, gateConfigToJson, MAX_FOCUS_MANIFEST_BYTES, parseFocusManifest, parseFocusManifestContent, repoDocGenerationConfigToJson, reviewConfigToJson, reviewRecapConfigToJson, settingsOverrideToJson, type FocusManifest, type FocusManifestSource, type RepoReviewContext } from "./focus-manifest";
+import { focusManifestToJson, MAX_FOCUS_MANIFEST_BYTES, parseFocusManifest, parseFocusManifestContent, type FocusManifest, type FocusManifestSource, type RepoReviewContext } from "./focus-manifest";
 import { GITTENSORY_REPO_FOCUS_MANIFEST_YAML, resolveGittensorySelfRepoFullName } from "../config/gittensory-repo-focus-manifest";
 
 export const REPO_FOCUS_MANIFEST_SIGNAL = "repo-focus-manifest";
@@ -270,23 +270,7 @@ async function persistRepoFocusManifest(env: Env, repoFullName: string, manifest
 }
 
 function manifestToJson(manifest: FocusManifest): Record<string, JsonValue> {
-  return {
-    source: manifest.source,
-    wantedPaths: manifest.wantedPaths,
-    preferredLabels: manifest.preferredLabels,
-    linkedIssuePolicy: manifest.linkedIssuePolicy,
-    testExpectations: manifest.testExpectations,
-    issueDiscoveryPolicy: manifest.issueDiscoveryPolicy,
-    maintainerNotes: manifest.maintainerNotes,
-    publicNotes: manifest.publicNotes,
-    gate: gateConfigToJson(manifest.gate),
-    settings: settingsOverrideToJson(manifest.settings),
-    review: reviewConfigToJson(manifest.review),
-    features: featuresConfigToJson(manifest.features),
-    contentLane: contentLaneConfigToJson(manifest.contentLane),
-    repoDocGeneration: repoDocGenerationConfigToJson(manifest.repoDocGeneration),
-    reviewRecap: reviewRecapConfigToJson(manifest.reviewRecap),
-  };
+  return focusManifestToJson(manifest);
 }
 
 function snapshotAgeMs(generatedAt: string | null | undefined): number {

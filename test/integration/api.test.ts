@@ -1256,6 +1256,37 @@ describe("api routes", () => {
     const malformedIssueSlop = await app.request("/v1/lint/issue-slop", { method: "POST", headers: apiHeaders(env), body: "{not json" }, env);
     expect(malformedIssueSlop.status).toBe(400);
 
+    // Pre-submit .gittensory.yml validation (#2057): mirrors the gittensory_validate_config MCP tool, reusing the
+    // review stack's own parser (single source of truth).
+    const validateConfig = await app.request(
+      "/v1/lint/validate-config",
+      { method: "POST", headers: apiHeaders(env), body: JSON.stringify({ content: "gate:\n  enabled: true\nblockedPaths: [dist/]\n" }) },
+      env,
+    );
+    expect(validateConfig.status).toBe(200);
+    const validateConfigBody = await validateConfig.json();
+    expect(validateConfigBody).toMatchObject({
+      present: true,
+      recognizedFields: ["gate"],
+      warnings: ["blockedPaths is retired; use settings.hardGuardrailGlobs for path holds."],
+      normalized: expect.objectContaining({ source: "repo_file" }),
+    });
+
+    // Session identities can reach it — allowlisted like the other local self-checks.
+    const { token: validateConfigSessionToken } = await createSessionForGitHubUser(env, { login: "validate-config-user", id: 4545 });
+    const sessionValidateConfig = await app.request(
+      "/v1/lint/validate-config",
+      { method: "POST", headers: { authorization: `Bearer ${validateConfigSessionToken}`, "content-type": "application/json" }, body: JSON.stringify({ content: "wantedPaths: [src/]\n" }) },
+      env,
+    );
+    expect(sessionValidateConfig.status).toBe(200);
+
+    const invalidValidateConfig = await app.request("/v1/lint/validate-config", { method: "POST", headers: apiHeaders(env), body: JSON.stringify({}) }, env);
+    expect(invalidValidateConfig.status).toBe(400);
+
+    const malformedValidateConfig = await app.request("/v1/lint/validate-config", { method: "POST", headers: apiHeaders(env), body: "{not json" }, env);
+    expect(malformedValidateConfig.status).toBe(400);
+
     const queueIntelligence = await app.request(
       "/v1/internal/queue-intelligence",
       {

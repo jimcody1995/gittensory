@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lintManifestText } from "../../src/selfhost/config-lint";
+import { lintManifestText, validateManifestConfig } from "../../src/selfhost/config-lint";
 import { MAX_FOCUS_MANIFEST_BYTES } from "../../src/signals/focus-manifest";
 
 describe("lintManifestText (#2079)", () => {
@@ -258,6 +258,54 @@ review:
       `Manifest content exceeded ${MAX_FOCUS_MANIFEST_BYTES} bytes; ignoring it and falling back to deterministic signals.`,
     ]);
     expect(JSON.stringify(result)).not.toContain("unknownSecretKey");
+    expect(JSON.stringify(result)).not.toContain("super-secret-value");
+  });
+});
+
+describe("validateManifestConfig (#2057)", () => {
+  it("normalizes a valid manifest, reports it present, and emits no warnings", () => {
+    const result = validateManifestConfig("wantedPaths:\n  - src/\n");
+
+    expect(result.present).toBe(true);
+    expect(result.warnings).toEqual([]);
+    expect(result.recognizedFields).toEqual(["wantedPaths"]);
+    // `normalized` is the canonical serialization the loader persists — safe defaults applied.
+    expect(result.normalized.source).toBe("repo_file");
+    expect(result.normalized.wantedPaths).toEqual(["src/"]);
+    expect(result.normalized.settings).toBeNull(); // no settings block → serializes to null, same as the cache round-trip
+  });
+
+  it("surfaces a redacted parser warning for an invalid value while still normalizing the field", () => {
+    const result = validateManifestConfig("wantedPaths: [src/]\nlinkedIssuePolicy: sometimes\n");
+
+    expect(result.present).toBe(true);
+    expect(result.recognizedFields).toEqual(["wantedPaths", "linkedIssuePolicy"]);
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.warnings.join("\n")).toContain("falling back to the default");
+    // the invalid value fell back to a valid default rather than being echoed back
+    expect(result.normalized.linkedIssuePolicy).toBe("optional");
+    expect(JSON.stringify(result)).not.toContain("sometimes");
+  });
+
+  it("degrades malformed YAML to present:false with a warning, never throwing", () => {
+    const result = validateManifestConfig("wantedPaths: [unterminated");
+
+    expect(result.present).toBe(false);
+    expect(result.recognizedFields).toEqual([]);
+    expect(result.warnings).toEqual([
+      "Manifest content was not valid YAML; ignoring it and falling back to deterministic signals.",
+    ]);
+    // still returns a well-formed normalized empty manifest
+    expect(result.normalized.source).toBe("repo_file");
+    expect(result.normalized.wantedPaths).toEqual([]);
+  });
+
+  it("flags an unknown top-level field by name without echoing its value", () => {
+    const result = validateManifestConfig("wantedPaths: [src/]\nunknownSecretKey: super-secret-value\n");
+
+    expect(result.present).toBe(true);
+    expect(result.recognizedFields).toEqual(["wantedPaths"]);
+    expect(result.warnings).toEqual(["Manifest contains unknown top-level field: unknownSecretKey."]);
     expect(JSON.stringify(result)).not.toContain("super-secret-value");
   });
 });

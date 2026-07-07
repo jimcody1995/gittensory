@@ -228,6 +228,10 @@ const checkIssueSlopShape = {
   body: z.string().max(40000).optional(),
 };
 
+const validateConfigShape = {
+  content: z.string().max(128 * 1024), // MAX_FOCUS_MANIFEST_BYTES — bound the payload before it reaches the API parser
+};
+
 const preflightShape = {
   repoFullName: z.string().min(3),
   contributorLogin: z.string().min(1).optional(),
@@ -449,6 +453,16 @@ server.registerTool(
     inputSchema: checkIssueSlopShape,
   },
   async (input) => toolResult("Gittensory issue-slop self-check.", await apiPost("/v1/lint/issue-slop", input)),
+);
+
+server.registerTool(
+  "gittensory_validate_config",
+  {
+    description:
+      "Validate a supplied .gittensory.yml (or JSON) manifest string BEFORE pushing it, using the exact same tolerant parser the review stack runs — no parallel schema. Returns the normalized config, every parse warning (invalid values, unknown fields), and whether any recognized field was present. Metadata only, no repo context.",
+    inputSchema: validateConfigShape,
+  },
+  async (input) => toolResult("Gittensory .gittensory.yml validation.", await apiPost("/v1/lint/validate-config", input)),
 );
 
 server.registerTool(

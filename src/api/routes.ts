@@ -253,6 +253,7 @@ import { getPublicStats, isPublicStatsEnabled } from "../review/public-stats";
 import { buildMaintainerQualityDashboard, isMaintainerQualityDataStale } from "../services/maintainer-quality-dashboard";
 import { MAX_LOCAL_SCORER_WARNING_CHARS, MAX_LOCAL_SCORER_WARNING_COUNT } from "../signals/local-scorer-diagnostics";
 import { compileFocusManifestPolicy, MAX_FOCUS_MANIFEST_BYTES, normalizeReadinessGateMode } from "../signals/focus-manifest";
+import { validateManifestConfig } from "../selfhost/config-lint";
 import { resolveRepositorySettings } from "../settings/repository-settings";
 import { loadPublicRepoFocusManifest, loadRepoFocusManifest, upsertRepoFocusManifest } from "../signals/focus-manifest-loader";
 import { buildRepoOnboardingPackPreviewForRepo } from "../services/repo-onboarding-pack";
@@ -465,6 +466,12 @@ const slopRiskSchema = z.object({
 const issueSlopSchema = z.object({
   title: z.string().max(500).optional(),
   body: z.string().max(40000).optional(),
+});
+// Pre-submit .gittensory.yml validation (#2057): parse a supplied manifest STRING with the same tolerant parser
+// the review stack runs, so an operator/contributor can catch a typo or invalid value before pushing. Mirrors the
+// gittensory_validate_config MCP tool so the npm package can offer the same source-free self-check.
+const validateConfigSchema = z.object({
+  content: z.string().max(MAX_FOCUS_MANIFEST_BYTES),
 });
 
 const selfhostDeadLetterQueueQuerySchema = z
@@ -2779,6 +2786,15 @@ export function createApp() {
     const parsed = issueSlopSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid_issue_slop_request", issues: parsed.error.issues }, 400);
     return c.json({ ...buildIssueSlopAssessment(parsed.data), rubric: ISSUE_SLOP_RUBRIC_MARKDOWN });
+  });
+
+  // Pre-submit .gittensory.yml validation (#2057): mirrors the gittensory_validate_config MCP tool. Reuses the
+  // review stack's own parser — no parallel schema — so the verdict matches what the gate will actually see.
+  app.post("/v1/lint/validate-config", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = validateConfigSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid_validate_config_request", issues: parsed.error.issues }, 400);
+    return c.json(validateManifestConfig(parsed.data.content));
   });
 
   app.post("/v1/preflight/pr", async (c) => {
@@ -5142,6 +5158,7 @@ const EXTENSION_PULL_CONTEXT_SCOPE = "extension:pull_context";
 const LINT_PR_TEXT_PATH = "/v1/lint/pr-text";
 const LINT_SLOP_RISK_PATH = "/v1/lint/slop-risk";
 const LINT_ISSUE_SLOP_PATH = "/v1/lint/issue-slop";
+const LINT_VALIDATE_CONFIG_PATH = "/v1/lint/validate-config";
 // Contributor (miner) side of the extension (#556). Minted for NON-maintainer sign-ins; strictly
 // self-only — a token may only reach `/v1/extension/contributors/<self>/*`, enforced by the coarse
 // path check below plus `requireContributorAccess` (actor === login) in every handler.
@@ -5205,7 +5222,7 @@ function canSessionAccessPath(env: Env, identity: Extract<AuthIdentity, { kind: 
   if (isRepoAgentAuditFeedPath(path)) return true; // route's requireRepoMaintainer enforces per-repo authority (contributors → 403)
   if (isRepoAgentPendingActionsPath(path)) return true; // list-only: requireRepoMaintainer; decision POSTs require server tokens
   if (isRepoContributorIssueDraftGeneratePath(path)) return true;
-  if (path === LINT_PR_TEXT_PATH || path === LINT_SLOP_RISK_PATH || path === LINT_ISSUE_SLOP_PATH) return true;
+  if (path === LINT_PR_TEXT_PATH || path === LINT_SLOP_RISK_PATH || path === LINT_ISSUE_SLOP_PATH || path === LINT_VALIDATE_CONFIG_PATH) return true;
   if (path === EXTENSION_PULL_CONTEXT_PATH && isExtensionScopedSession(identity)) return true;
   // Contributor extension scope reaches only `/v1/extension/contributors/<login>/*`; the handler's
   // requireContributorAccess then enforces actor === login (self-only).

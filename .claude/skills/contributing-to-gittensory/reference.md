@@ -146,6 +146,9 @@ All tools are metadata-only (no source upload). Run in this order:
    strong/adequate/weak + specific fixes.
 5. `gittensory_predict_gate` — `{login, owner, repo, title, body, labels, linkedIssues}` → predicted
    conclusion + blockers + warnings + readiness score.
+6. `gittensory_validate_config` — `{content}` → `{present, normalized, warnings, recognizedFields}` —
+   pre-validate a `.gittensory.yml` (or JSON) string against the SAME parser the review stack runs, before
+   pushing it. No repo context needed.
 
 (Auth'd extras: `gittensory_preflight_pr` / `…_local_diff` for lane fit + collision + queue health.)
 

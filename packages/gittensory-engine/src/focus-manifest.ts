@@ -2607,6 +2607,32 @@ export function parseFocusManifestContent(content: string | null | undefined, so
 }
 
 /**
+ * Serialize a parsed manifest into its canonical, normalized JSON form (safe defaults applied, only the
+ * documented fields, `present`/`warnings` intentionally excluded). This is the single source of truth for the
+ * cache round-trip (`focus-manifest-loader`) and the `gittensory_validate_config` MCP predictor (#2057), so a
+ * validated manifest normalizes byte-identically to how it is persisted and re-read — no parallel serializer.
+ */
+export function focusManifestToJson(manifest: FocusManifest): Record<string, JsonValue> {
+  return {
+    source: manifest.source,
+    wantedPaths: manifest.wantedPaths,
+    preferredLabels: manifest.preferredLabels,
+    linkedIssuePolicy: manifest.linkedIssuePolicy,
+    testExpectations: manifest.testExpectations,
+    issueDiscoveryPolicy: manifest.issueDiscoveryPolicy,
+    maintainerNotes: manifest.maintainerNotes,
+    publicNotes: manifest.publicNotes,
+    gate: gateConfigToJson(manifest.gate),
+    settings: settingsOverrideToJson(manifest.settings),
+    review: reviewConfigToJson(manifest.review),
+    features: featuresConfigToJson(manifest.features),
+    contentLane: contentLaneConfigToJson(manifest.contentLane),
+    repoDocGeneration: repoDocGenerationConfigToJson(manifest.repoDocGeneration),
+    reviewRecap: reviewRecapConfigToJson(manifest.reviewRecap),
+  };
+}
+
+/**
  * Format a manifest's parse `warnings[]` into one grouped, deduped, order-preserving notice for the review
  * surface — an acceptance criterion of #1670: an invalid/malformed `.gittensory.yml` value should fail
  * clearly instead of silently falling back to a default. Empty/no warnings ⇒ `null` (byte-identical, no

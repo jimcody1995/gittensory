@@ -1,5 +1,6 @@
 import { parse as parseYaml } from "yaml";
-import { MAX_FOCUS_MANIFEST_BYTES, parseFocusManifestContent } from "../signals/focus-manifest";
+import { focusManifestToJson, MAX_FOCUS_MANIFEST_BYTES, parseFocusManifestContent } from "../signals/focus-manifest";
+import type { JsonValue } from "../types";
 
 const TOP_LEVEL_FIELDS = [
   "source",
@@ -50,6 +51,32 @@ export function lintManifestText(text: string | null | undefined): SelfHostConfi
     summary: ok
       ? `Manifest parsed ${recognizedFields.length} recognized field${recognizedFields.length === 1 ? "" : "s"}.`
       : `Manifest has ${warnings.length} warning${warnings.length === 1 ? "" : "s"}.`,
+  };
+}
+
+export type ValidateManifestConfigResult = {
+  present: boolean;
+  normalized: Record<string, JsonValue>;
+  warnings: string[];
+  recognizedFields: string[];
+};
+
+/**
+ * Pre-validate a supplied `.gittensory.yml` string against the SAME tolerant parser the review stack runs
+ * (#2057, sibling of the MCP gate predictors) — never a parallel schema. Returns the manifest normalized to its
+ * canonical JSON form ({@link focusManifestToJson}), the parser's `warnings[]` (redacted + unknown-top-level
+ * warnings, via {@link lintManifestText}), and `present` (whether any recognized focus field survived parse), so
+ * a contributor/operator can catch a typo or invalid value before pushing. Malformed input degrades to
+ * `present: false` + a warning, exactly like the analysis path — this never throws.
+ */
+export function validateManifestConfig(text: string | null | undefined): ValidateManifestConfigResult {
+  const manifest = parseFocusManifestContent(text, "repo_file");
+  const { warnings, recognizedFields } = lintManifestText(text);
+  return {
+    present: manifest.present,
+    normalized: focusManifestToJson(manifest),
+    warnings,
+    recognizedFields,
   };
 }
 

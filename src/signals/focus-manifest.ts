@@ -18,6 +18,7 @@ export {
   compileFocusManifestPolicy,
   contentLaneConfigToJson,
   featuresConfigToJson,
+  focusManifestToJson,
   formatManifestValidationNotice,
   gateConfigToJson,
   isFocusManifestPublicSafe,
