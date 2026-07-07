@@ -66,6 +66,14 @@ describe("hasImageBearingMarkdownTable", () => {
     const body = ["| Before | After |", "|:---:|:---:|", "| ![a](x.png) | ![b](y.png) |"].join("\n");
     expect(hasImageBearingMarkdownTable(body)).toBe(true);
   });
+
+  it("rejects long whitespace-only separator candidates without hanging", () => {
+    const whitespace = " ".repeat(8_000);
+    const body = ["| Before | After |", whitespace, "| ![a](x.png) | ![b](y.png) |"].join("\n");
+    const started = performance.now();
+    expect(hasImageBearingMarkdownTable(body)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
 });
 
 describe("hasImageOutsideTable", () => {

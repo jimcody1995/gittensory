@@ -88,6 +88,20 @@ export function normalizeScreenshotTableGateConfig(input: unknown, warnings: str
   };
 }
 
+/** Linear-time markdown table separator check. The previous single-regex form nested unbounded `\\s*` inside a
+ *  repeated group and could catastrophically backtrack on attacker-controlled PR bodies; this splits on `|` and
+ *  validates each cell independently instead. */
+const TABLE_SEPARATOR_CELL = /^\s*:?-{3,}:?\s*$/;
+
+function isMarkdownTableSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || !/-{3,}/.test(trimmed)) return false;
+  const withoutEdgePipes = trimmed.replace(/^\|/, "").replace(/\|$/, "").trim();
+  if (!withoutEdgePipes) return false;
+  const cells = withoutEdgePipes.split("|");
+  return cells.length > 0 && cells.every((cell) => TABLE_SEPARATOR_CELL.test(cell));
+}
+
 /** True when `body` contains at least one markdown TABLE region (`| ... |` header + separator row) whose cells
  *  embed image markup — either `![alt](url)` or an `<img ...>` tag — inside the table. A screenshot pasted as a
  *  bare inline image OUTSIDE any table does not count (the contract requires captioned thumbnails INSIDE a
@@ -99,7 +113,6 @@ export function hasImageBearingMarkdownTable(body: string | null | undefined): b
   if (!body) return false;
   const lines = body.split(/\r?\n/);
   const tableRowPattern = /^\s*\|.*\|\s*$/;
-  const separatorRowPattern = /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
   const imagePattern = /!\[[^\]]*\]\([^)]+\)|<img\b[^>]*>/i;
   for (let i = 0; i < lines.length - 1; i += 1) {
     // `i < lines.length - 1` guarantees both indices are in bounds; the `?? ""` fallbacks only exist to
@@ -108,7 +121,7 @@ export function hasImageBearingMarkdownTable(body: string | null | undefined): b
     const header = lines[i] ?? "";
     /* v8 ignore next -- defensive: the loop bound above guarantees lines[i + 1] always exists here. */
     const separator = lines[i + 1] ?? "";
-    if (!tableRowPattern.test(header) || !separatorRowPattern.test(separator)) continue;
+    if (!tableRowPattern.test(header) || !isMarkdownTableSeparatorRow(separator)) continue;
     // Found a table (header + separator). Scan its body rows (until a blank line or a non-table line) for
     // image markup in any cell.
     let j = i + 2;
