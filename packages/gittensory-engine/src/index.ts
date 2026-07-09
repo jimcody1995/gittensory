@@ -342,3 +342,10 @@ export {
   type MaintainerNoiseReport,
   type PullRequestReviewability,
 } from "./reward-risk.js";
+// Miner "hands" seam (#4262) — provider-agnostic coding-agent interface mirrored on SelfHostAi.
+export {
+  type CodingAgentDriver,
+  type CodingAgentDriverResult,
+  type CodingAgentDriverTask,
+  type CodingAgentDriverUsageSummary,
+} from "./miner/coding-agent-driver.js";
