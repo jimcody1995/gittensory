@@ -179,8 +179,9 @@ describe("buildMaintainerSlopDuplicateTrend", () => {
         {
           repoFullName: "octo/demo",
           queueHealthSnapshots: [
-            queueHealthSnapshot("2026-06-09T08:00:00.000Z", { openPullRequests: 4, slopFlaggedPullRequests: 1 }),
+            // Newer snapshot first so a later older point exercises the keep-existing branch.
             queueHealthSnapshot("2026-06-09T18:00:00.000Z", { openPullRequests: 8, slopFlaggedPullRequests: 4 }),
+            queueHealthSnapshot("2026-06-09T08:00:00.000Z", { openPullRequests: 4, slopFlaggedPullRequests: 1 }),
           ],
         },
         {
