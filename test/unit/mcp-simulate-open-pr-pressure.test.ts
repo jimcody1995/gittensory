@@ -28,6 +28,8 @@ function queueHealth(level: "low" | "medium" | "high" | "critical", overrides: {
       draftPullRequests: 0,
       maintainerAuthoredPullRequests: 0,
       collisionClusters: 0,
+      slopFlaggedPullRequests: 0,
+      duplicateFlaggedPullRequests: 0,
       ageBuckets: { under7Days: 3, days7To30: 2, over30Days: 1 },
       likelyReviewablePullRequests: 5,
     },
